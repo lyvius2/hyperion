@@ -15,6 +15,7 @@
 | [ARCHITECTURE_DESIGN.md](./docs/ARCHITECTURE_DESIGN.md) | Full system architecture, domain models, infrastructure, and embedding pipeline design |
 | [DATABASE_SCHEMA.md](./docs/DATABASE_SCHEMA.md) | Defines the platform meta DB schema for the NL-to-SQL Data Platform |
 | [API_SPECIFICATION.md](./docs/API_SPECIFICATION.md) | Complete REST API and WebSocket protocol specification |
+| [UI_UX_DESIGN.md](./docs/UI_UX_DESIGN.md) | UI/UX Design |
 
 Always read both documents before writing code. Any implementation that conflicts with the design documents is not permitted.
 
@@ -668,6 +669,40 @@ log.error("API Key: $apiKey", e)
 // .env
 // **/application-prod.yml
 // **/*-secret.yml
+```
+
+### 9-5. Session Authentication Rules
+
+This project uses **HTTP Session backed by Spring Session Data Redis** for authentication.  
+Access tokens (JWT/Bearer) are **not issued**. This API is for internal use only.
+
+```kotlin
+// ✅ Required: Spring Session + Redis configuration
+// application.yaml
+// spring.session.store-type: redis
+// spring.session.timeout: 15m
+
+// ✅ Required: Session-based auth flow
+// Login  → create HttpSession → Spring Session stores in Redis → return JSESSIONID cookie
+// Request → read JSESSIONID → Spring Session checks Redis → found: authenticated / not found: 401
+// Logout → session.invalidate() → deleted from Redis immediately
+
+// ✅ Required: Heartbeat API to keep session alive
+// Client calls POST /api/auth/heartbeat every 10 minutes
+// Any authenticated request resets the Redis TTL to 15 minutes
+
+// ✅ Required: Secure cookie settings
+// server.servlet.session.cookie.http-only=true
+// server.servlet.session.cookie.secure=true   (HTTPS only)
+// server.servlet.session.cookie.same-site=Strict
+```
+
+```
+❌ Prohibited: Issuing JWT or Bearer access tokens for authentication
+❌ Prohibited: Storing session data in JVM heap without Redis backing
+❌ Prohibited: Exposing Redis port outside loopback (must bind to 127.0.0.1)
+❌ Prohibited: Running Redis without a password
+❌ Prohibited: Using REFRESH_TOKEN type in member_tokens (session replaces token auth)
 ```
 
 ---

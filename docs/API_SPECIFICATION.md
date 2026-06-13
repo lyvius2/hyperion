@@ -2,7 +2,7 @@
 
 > Date: 2026-06-12  
 > Base URL: `https://hyperion.furaiki-lifelog.com`  
-> Authentication: Bearer Token (JWT)  
+> Authentication: HTTP Session (JSESSIONID Cookie)  
 > Response Format: `application/json` (except file downloads)  
 > Character Encoding: UTF-8
 
@@ -31,11 +31,19 @@
 
 ### 1-1. Authentication
 
-All APIs (except auth endpoints) require a JWT token in the HTTP request header.
+All APIs (except `/auth/login`) require a valid session.  
+Authentication is handled via the `JSESSIONID` cookie set at login — **no Authorization header is needed**.  
+The browser sends the cookie automatically on every request.
 
-```
-Authorization: Bearer {access_token}
-```
+**Session lifecycle:**
+
+| Item | Value |
+|------|-------|
+| Session TTL | 15 minutes (max-inactive-interval) |
+| Keep-alive | Call `POST /api/auth/heartbeat` every 10 minutes |
+| On logout | Session invalidated and cookie cleared immediately |
+
+**Role-based access control:**
 
 | Role | Accessible Paths |
 |------|----------------|
@@ -121,25 +129,24 @@ POST /auth/login
 
 ```json
 {
-  "username": "yunson",
+  "username": "sherlock",
   "password": "P@ssw0rd!"
 }
 ```
 
 **Response 200**
 
+A `Set-Cookie: JSESSIONID=...` header is included in the response.  
+The browser stores and sends this cookie automatically on all subsequent requests.
+
 ```json
 {
   "success": true,
   "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "tokenType": "Bearer",
-    "expiresIn": 3600,
     "member": {
       "id": 1,
-      "username": "yunson",
-      "displayName": "Yunson Hwang",
+      "username": "sherlock",
+      "displayName": "Sherlock Holmes",
       "role": "ADMIN",
       "profileImageUrl": null
     }
@@ -157,19 +164,16 @@ POST /auth/login
 
 ---
 
-### 2-2. Token Refresh
+### 2-2. Heartbeat (Session Keep-Alive)
+
+Resets the session TTL to prevent expiry while the user is active.  
+The client must call this endpoint every **10 minutes**.
 
 ```
-POST /auth/refresh
+POST /api/auth/heartbeat
 ```
 
-**Request Body**
-
-```json
-{
-  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
+> Authentication required (JSESSIONID cookie)
 
 **Response 200**
 
@@ -177,11 +181,14 @@ POST /auth/refresh
 {
   "success": true,
   "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "expiresIn": 3600
+    "sessionExpiresIn": 900
   }
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `sessionExpiresIn` | Remaining TTL in seconds after reset (always 900 = 15 min) |
 
 ---
 
@@ -189,10 +196,13 @@ POST /auth/refresh
 
 ```
 POST /auth/logout
-Authorization: Bearer {access_token}
 ```
 
+> Authentication required (JSESSIONID cookie)
+
 **Response 200**
+
+The `JSESSIONID` cookie is cleared in the response (`Set-Cookie: JSESSIONID=; Max-Age=0`).
 
 ```json
 {
@@ -207,8 +217,9 @@ Authorization: Bearer {access_token}
 
 ```
 GET /auth/me
-Authorization: Bearer {access_token}
 ```
+
+> Authentication required (JSESSIONID cookie)
 
 **Response 200**
 
@@ -217,9 +228,9 @@ Authorization: Bearer {access_token}
   "success": true,
   "data": {
     "id": 1,
-    "username": "yunson",
-    "email": "yunson@example.com",
-    "displayName": "Yunson Hwang",
+    "username": "sherlock",
+    "email": "sherlock@example.com",
+    "displayName": "Sherlock Holmes",
     "role": "ADMIN",
     "status": "ACTIVE",
     "lastLoginAt": "2026-06-12T09:00:00+09:00",
@@ -234,8 +245,9 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /auth/password
-Authorization: Bearer {access_token}
 ```
+
+> Authentication required (JSESSIONID cookie)
 
 **Request Body**
 
@@ -273,7 +285,6 @@ API for users to select a system before submitting a query.
 
 ```
 GET /api/systems
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -321,7 +332,6 @@ Processing is asynchronous; results are received via WebSocket.
 
 ```
 POST /api/query/extract
-Authorization: Bearer {access_token}
 Content-Type: application/json
 ```
 
@@ -375,7 +385,6 @@ Accepts natural language input and generates a d3.js HTML visualization.
 
 ```
 POST /api/query/visualize
-Authorization: Bearer {access_token}
 Content-Type: application/json
 ```
 
@@ -412,7 +421,6 @@ Content-Type: application/json
 
 ```
 GET /board
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -439,7 +447,7 @@ Authorization: Bearer {access_token}
       "status": "COMPLETED",
       "requestedBy": {
         "id": 1,
-        "displayName": "Yunson Hwang"
+        "displayName": "Sherlock Holmes"
       },
       "requestedAt": "2026-06-12T14:30:00+09:00",
       "expiresAt": "2026-06-14T14:30:00+09:00",
@@ -454,7 +462,7 @@ Authorization: Bearer {access_token}
       "status": "COMPLETED",
       "requestedBy": {
         "id": 1,
-        "displayName": "Yunson Hwang"
+        "displayName": "Sherlock Holmes"
       },
       "requestedAt": "2026-06-12T13:00:00+09:00",
       "expiresAt": "2026-06-14T13:00:00+09:00",
@@ -478,7 +486,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /board/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Path Parameters**
@@ -502,7 +509,7 @@ Authorization: Bearer {access_token}
     "status": "COMPLETED",
     "requestedBy": {
       "id": 1,
-      "displayName": "Yunson Hwang"
+      "displayName": "Sherlock Holmes"
     },
     "requestedAt": "2026-06-12T14:30:00+09:00",
     "expiresAt": "2026-06-14T14:30:00+09:00",
@@ -528,7 +535,7 @@ Authorization: Bearer {access_token}
     "status": "COMPLETED",
     "requestedBy": {
       "id": 1,
-      "displayName": "Yunson Hwang"
+      "displayName": "Sherlock Holmes"
     },
     "requestedAt": "2026-06-12T13:00:00+09:00",
     "expiresAt": "2026-06-14T13:00:00+09:00",
@@ -552,7 +559,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /board/{id}/download
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -578,7 +584,6 @@ Endpoint used directly as the `src` attribute of an iframe.
 
 ```
 GET /board/{id}/html
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -616,8 +621,10 @@ Channel for receiving async processing results after query requests (extract/vis
 ```
 WSS /ws
 Sec-WebSocket-Protocol: stomp
-Authorization: Bearer {access_token}
 ```
+
+Authentication is via the `JSESSIONID` cookie — no Authorization header required.  
+The browser sends the cookie automatically during the WebSocket handshake.
 
 SockJS fallback URL: `https://your-domain.com/ws`
 
@@ -628,7 +635,7 @@ Subscribe using the `wsSubscribePath` from the `POST /api/query/extract` (or vis
 ```javascript
 const client = new Client({
   webSocketFactory: () => new SockJS('/ws'),
-  connectHeaders: { Authorization: `Bearer ${accessToken}` },
+  // No connectHeaders needed — JSESSIONID cookie is sent automatically
   onConnect: () => {
     client.subscribe(wsSubscribePath, (message) => {
       const payload = JSON.parse(message.body);
@@ -701,7 +708,6 @@ client.activate();
 
 ```
 GET /admin/members
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -721,9 +727,9 @@ Authorization: Bearer {access_token}
   "data": [
     {
       "id": 1,
-      "username": "yunson",
-      "email": "yunson@example.com",
-      "displayName": "Yunson Hwang",
+      "username": "sherlock",
+      "email": "sherlock@example.com",
+      "displayName": "Sherlock Holmes",
       "role": "ADMIN",
       "status": "ACTIVE",
       "lastLoginAt": "2026-06-12T09:00:00+09:00",
@@ -740,7 +746,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/members
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -786,7 +791,6 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /admin/members/{id}/role
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -812,7 +816,6 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /admin/members/{id}/status
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -848,7 +851,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -885,7 +887,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/systems
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -946,7 +947,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -989,7 +989,7 @@ Authorization: Bearer {access_token}
         "lastEmbeddedAt": "2026-06-12T14:28:00+09:00"
       }
     ],
-    "createdBy": { "id": 1, "displayName": "Yunson Hwang" },
+    "createdBy": { "id": 1, "displayName": "Sherlock Holmes" },
     "createdAt": "2026-01-15T09:00:00+09:00"
   }
 }
@@ -1001,7 +1001,6 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /admin/systems/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Request Body** — Include only fields to change (Partial Update)
@@ -1034,7 +1033,6 @@ Authorization: Bearer {access_token}
 
 ```
 DELETE /admin/systems/{id}
-Authorization: Bearer {access_token}
 ```
 
 The following operations are executed in order on deletion:
@@ -1069,7 +1067,6 @@ The following operations are executed in order on deletion:
 
 ```
 GET /admin/systems/{systemId}/files
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1087,7 +1084,7 @@ Authorization: Bearer {access_token}
       "sourceHash": "a1b2c3d4...",
       "embeddedChunkCount": 48,
       "lastEmbeddedAt": "2026-06-12T14:28:00+09:00",
-      "uploadedBy": { "id": 1, "displayName": "Yunson Hwang" },
+      "uploadedBy": { "id": 1, "displayName": "Sherlock Holmes" },
       "uploadedAt": "2026-06-12T10:00:00+09:00"
     }
   ]
@@ -1102,7 +1099,6 @@ Embedding is automatically triggered immediately after upload.
 
 ```
 POST /admin/systems/{systemId}/files
-Authorization: Bearer {access_token}
 Content-Type: multipart/form-data
 ```
 
@@ -1144,7 +1140,6 @@ Content-Type: multipart/form-data
 
 ```
 DELETE /admin/systems/{systemId}/files/{fileId}
-Authorization: Bearer {access_token}
 ```
 
 When a file is deleted, the associated chunks are also removed from ChromaDB.
@@ -1169,7 +1164,6 @@ Incremental embedding is automatically triggered based on changed files after co
 
 ```
 POST /admin/systems/{systemId}/git/sync
-Authorization: Bearer {access_token}
 ```
 
 **Response 202** — Async processing
@@ -1198,7 +1192,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/git/status
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1225,7 +1218,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/systems/{systemId}/ingest
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -1267,7 +1259,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/ingest/status
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1319,7 +1310,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/jobs
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -1343,7 +1333,7 @@ Authorization: Bearer {access_token}
       "id": 102,
       "jobType": "INGESTION_INCREMENTAL",
       "systemName": "hexa",
-      "triggeredBy": { "id": 1, "displayName": "Yunson Hwang" },
+      "triggeredBy": { "id": 1, "displayName": "Sherlock Holmes" },
       "status": "SUCCESS",
       "startedAt": "2026-06-12T14:25:00+09:00",
       "finishedAt": "2026-06-12T14:30:00+09:00",
@@ -1355,7 +1345,7 @@ Authorization: Bearer {access_token}
       "id": 101,
       "jobType": "QUERY_EXTRACT",
       "systemName": "hexa",
-      "triggeredBy": { "id": 1, "displayName": "Yunson Hwang" },
+      "triggeredBy": { "id": 1, "displayName": "Sherlock Holmes" },
       "status": "FAILED",
       "startedAt": "2026-06-12T14:00:00+09:00",
       "finishedAt": "2026-06-12T14:00:15+09:00",
@@ -1376,7 +1366,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/jobs/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1390,7 +1379,7 @@ Authorization: Bearer {access_token}
     "referenceId": 42,
     "referenceType": "QUERY_RESULT",
     "systemName": "hexa",
-    "triggeredBy": { "id": 1, "displayName": "Yunson Hwang" },
+    "triggeredBy": { "id": 1, "displayName": "Sherlock Holmes" },
     "status": "FAILED",
     "startedAt": "2026-06-12T14:00:00+09:00",
     "finishedAt": "2026-06-12T14:00:15+09:00",
@@ -1410,7 +1399,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/jobs
-Authorization: Bearer {access_token}
 ```
 
 *Same response structure as 11-1, but returns only jobs for the specified system.*

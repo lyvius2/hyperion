@@ -91,7 +91,7 @@
 | `members` → `query_results` | 1:N | A member submits multiple queries (`requested_by`) |
 | `members` → `system_files` | 1:N | A member uploads multiple files (`uploaded_by`) |
 | `members` → `job_history` | 1:N | A member triggers multiple jobs (`triggered_by`, nullable) |
-| `members` → `member_tokens` | 1:N | A member holds multiple tokens |
+| `members` → `member_tokens` | 1:N | A member holds multiple one-time tokens (email verify / password reset only) |
 | `target_systems` → `system_files` | 1:N | A system has multiple registered files |
 | `target_systems` → `query_results` | 1:N | A system has multiple query results |
 | `target_systems` → `job_history` | 1:N | A system has multiple job history records (nullable: SET NULL on DELETE) |
@@ -127,11 +127,15 @@
 
 ### 3-2. member_tokens
 
+> **Authentication sessions are NOT stored here.**  
+> HTTP session-based authentication uses **Redis** (via Spring Session Data Redis), not this table.  
+> This table stores one-time tokens for email verification and password reset only.
+
 | Column | Type | NULL | Default | Description |
 |--------|------|:----:|---------|-------------|
 | `id` | BIGINT | NO | AUTO_INCREMENT | Primary key |
 | `member_id` | BIGINT | NO | — | FK → members(id) |
-| `token_type` | VARCHAR(30) | NO | — | `EMAIL_VERIFY` \| `PASSWORD_RESET` \| `REFRESH_TOKEN` |
+| `token_type` | VARCHAR(30) | NO | — | `EMAIL_VERIFY` \| `PASSWORD_RESET` |
 | `token_hash` | VARCHAR(255) | NO | — | SHA-256 hash (original token not stored) |
 | `expires_at` | DATETIME | NO | — | Expiration time |
 | `used_at` | DATETIME | YES | NULL | Usage time (NULL = not yet used) |
@@ -374,8 +378,12 @@ init-sql/
 | `db_username_enc` | AES-256-GCM encryption (two-way) | Must be decryptable at runtime |
 | `db_password_enc` | AES-256-GCM encryption (two-way) | Must be decryptable at runtime |
 | `git_access_token_enc` | AES-256-GCM encryption (two-way) | Must be decryptable at runtime |
-| `token_hash` | SHA-256 hash (one-way) | Original email/reset tokens never stored |
+| `token_hash` | SHA-256 hash (one-way) | Original email/password-reset tokens never stored |
 | `slack_webhook_url` | Plain text | Slack Webhooks are unguessable random URLs |
+
+> **Authentication session data is not stored in MySQL.**  
+> Login sessions are stored in **Redis** (Spring Session Data Redis, namespace `hyperion:session`).  
+> Session TTL: 15 minutes, reset on every heartbeat call. Redis is password-protected and bound to loopback only.
 
 ---
 
@@ -384,12 +392,44 @@ init-sql/
 | Table | Deletion Policy | Retention |
 |-------|----------------|-----------|
 | `members` | Physical delete on withdrawal OR soft delete with `status=WITHDRAWN` | — |
-| `member_tokens` | Physical delete by scheduler after expiration | Varies by type (Refresh: 30 days, etc.) |
+| `member_tokens` | Physical delete by scheduler after expiration | `EMAIL_VERIFY`: 24 hours / `PASSWORD_RESET`: 1 hour |
 | `target_systems` | Physical delete | — |
 | `system_files` | Physical delete (cascades on system deletion) | — |
 | `query_results` | **DB record never deleted** / soft delete with `unused=Y` | Permanent |
 | `query_results` files | Physical delete by scheduler (`file_deleted=Y`) | requested_at + **2 days** |
 | `job_history` | Never deleted (audit log purpose) | Permanent |
+
+---
+
+---
+
+## 8. Session Store — Redis (Out-of-DB)
+
+Authentication sessions are stored in **Redis**, not in MySQL.  
+This section documents the Redis key structure for reference.
+
+| Item | Value |
+|------|-------|
+| Store | Redis 7 (`nlp-redis` container) |
+| Spring namespace | `hyperion:session` |
+| Key pattern | `hyperion:session:sessions:{sessionId}` |
+| TTL | 15 minutes (reset on each authenticated request) |
+| Max memory | 256 MB (`allkeys-lru` eviction) |
+| Password | Required (`REDIS_PASSWORD` env var) |
+| Port | 6379 — bound to `127.0.0.1` only |
+
+**Session payload (stored as Redis Hash):**
+
+```
+hyperion:session:sessions:{sessionId}
+  ├── sessionAttr:SPRING_SECURITY_CONTEXT   → SecurityContext (serialized)
+  ├── creationTime                           → epoch ms
+  ├── lastAccessedTime                       → epoch ms
+  └── maxInactiveInterval                    → 900 (seconds)
+```
+
+> Redis data does not participate in MySQL FK constraints or DDL scripts.  
+> Session lifecycle is managed entirely by Spring Session Data Redis.
 
 ---
 

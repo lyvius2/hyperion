@@ -89,7 +89,7 @@
 | `members` → `query_results` | 1:N | 회원이 여러 쿼리를 요청 (`requested_by`) |
 | `members` → `system_files` | 1:N | 회원이 여러 파일을 업로드 (`uploaded_by`) |
 | `members` → `job_history` | 1:N | 회원이 여러 작업을 트리거 (`triggered_by`, NULL 허용) |
-| `members` → `member_tokens` | 1:N | 회원이 여러 토큰 보유 |
+| `members` → `member_tokens` | 1:N | 회원이 여러 일회성 토큰 보유 (이메일 인증 / 비밀번호 재설정 전용) |
 | `target_systems` → `system_files` | 1:N | 시스템에 여러 파일 등록 |
 | `target_systems` → `query_results` | 1:N | 시스템에 여러 쿼리 결과 존재 |
 | `target_systems` → `job_history` | 1:N | 시스템에 여러 작업 이력 존재 (NULL 허용: SET NULL on DELETE) |
@@ -125,11 +125,15 @@
 
 ### 3-2. member_tokens (회원 토큰)
 
+> **인증 세션은 이 테이블에 저장하지 않습니다.**  
+> HTTP Session 기반 인증은 **Redis** (Spring Session Data Redis)를 사용하며, 이 테이블과 무관합니다.  
+> 이 테이블은 이메일 인증과 비밀번호 재설정 전용 일회성 토큰만 저장합니다.
+
 | 컬럼명 | 타입 | NULL | 기본값 | 설명 |
 |--------|------|:----:|--------|------|
 | `id` | BIGINT | NO | AUTO_INCREMENT | PK |
 | `member_id` | BIGINT | NO | — | FK → members(id) |
-| `token_type` | VARCHAR(30) | NO | — | `EMAIL_VERIFY` \| `PASSWORD_RESET` \| `REFRESH_TOKEN` |
+| `token_type` | VARCHAR(30) | NO | — | `EMAIL_VERIFY` \| `PASSWORD_RESET` |
 | `token_hash` | VARCHAR(255) | NO | — | SHA-256 해시 (원본 토큰 미저장) |
 | `expires_at` | DATETIME | NO | — | 만료 일시 |
 | `used_at` | DATETIME | YES | NULL | 사용 일시 (NULL=미사용) |
@@ -372,8 +376,12 @@ init-sql/
 | `db_username_enc` | AES-256-GCM 암호화 (양방향) | 런타임 복호화 필요 |
 | `db_password_enc` | AES-256-GCM 암호화 (양방향) | 런타임 복호화 필요 |
 | `git_access_token_enc` | AES-256-GCM 암호화 (양방향) | 런타임 복호화 필요 |
-| `token_hash` | SHA-256 해시 (단방향) | 이메일 인증/리셋 토큰 원문 미저장 |
+| `token_hash` | SHA-256 해시 (단방향) | 이메일 인증/비밀번호 재설정 토큰 원문 미저장 |
 | `slack_webhook_url` | 평문 저장 | Slack Webhook은 추측 불가한 랜덤 URL |
+
+> **인증 세션 데이터는 MySQL에 저장하지 않습니다.**  
+> 로그인 세션은 **Redis** (Spring Session Data Redis, 네임스페이스 `hyperion:session`)에 저장됩니다.  
+> 세션 TTL: 15분, Heartbeat 호출마다 초기화. Redis는 비밀번호 보호 및 loopback 전용 포트 운영.
 
 ---
 
@@ -382,12 +390,44 @@ init-sql/
 | 테이블 | 삭제 정책 | 보존 기간 |
 |--------|----------|----------|
 | `members` | 물리 삭제 (탈퇴 시) 또는 `status=WITHDRAWN` 소프트 삭제 | — |
-| `member_tokens` | 만료 후 스케줄러 물리 삭제 | 토큰 유형별 상이 (Refresh: 30일 등) |
+| `member_tokens` | 만료 후 스케줄러 물리 삭제 | `EMAIL_VERIFY`: 24시간 / `PASSWORD_RESET`: 1시간 |
 | `target_systems` | 물리 삭제 | — |
 | `system_files` | 물리 삭제 (시스템 삭제 시 연쇄) | — |
 | `query_results` | **DB 레코드 삭제 안 함** / `unused=Y` 소프트 삭제 | 영구 |
 | `query_results` 파일 | 스케줄러 물리 삭제 (`file_deleted=Y`) | 요청일 + **2일** |
 | `job_history` | 물리 삭제 안 함 (감사 로그 목적) | 영구 |
+
+---
+
+---
+
+## 8. 세션 스토어 — Redis (DB 외부)
+
+인증 세션은 MySQL이 아닌 **Redis**에 저장됩니다.  
+참조를 위해 Redis 키 구조를 문서화합니다.
+
+| 항목 | 값 |
+|------|-----|
+| 저장소 | Redis 7 (`nlp-redis` 컨테이너) |
+| Spring 네임스페이스 | `hyperion:session` |
+| 키 패턴 | `hyperion:session:sessions:{sessionId}` |
+| TTL | 15분 (인증된 요청마다 초기화) |
+| 최대 메모리 | 256 MB (`allkeys-lru` 정책) |
+| 비밀번호 | 필수 (`REDIS_PASSWORD` 환경변수) |
+| 포트 | 6379 — `127.0.0.1` 전용 바인딩 |
+
+**세션 페이로드 (Redis Hash로 저장):**
+
+```
+hyperion:session:sessions:{sessionId}
+  ├── sessionAttr:SPRING_SECURITY_CONTEXT   → SecurityContext (직렬화)
+  ├── creationTime                           → epoch ms
+  ├── lastAccessedTime                       → epoch ms
+  └── maxInactiveInterval                    → 900 (초)
+```
+
+> Redis 데이터는 MySQL FK 제약 조건 및 DDL 스크립트에 포함되지 않습니다.  
+> 세션 생명주기는 Spring Session Data Redis가 전적으로 관리합니다.
 
 ---
 

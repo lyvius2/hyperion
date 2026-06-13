@@ -2,7 +2,7 @@
 
 > 작성일: 2026-06-12  
 > Base URL: `https://hyperion.furaiki-lifelog.com`  
-> 인증 방식: Bearer Token (JWT)  
+> 인증 방식: HTTP Session (JSESSIONID Cookie)  
 > 응답 형식: `application/json` (파일 다운로드 제외)  
 > 문자 인코딩: UTF-8
 
@@ -29,11 +29,19 @@
 
 ### 1-1. 인증
 
-모든 API(인증 API 제외)는 HTTP 요청 헤더에 JWT 토큰이 필요합니다.
+모든 API(`/auth/login` 제외)는 유효한 세션이 필요합니다.  
+인증은 로그인 시 설정되는 `JSESSIONID` 쿠키로 처리됩니다 — **Authorization 헤더는 불필요합니다**.  
+브라우저가 모든 요청에 쿠키를 자동으로 포함합니다.
 
-```
-Authorization: Bearer {access_token}
-```
+**세션 생명 주기:**
+
+| 항목 | 값 |
+|------|-----|
+| 세션 TTL | 15분 (max-inactive-interval) |
+| 세션 유지 | `POST /api/auth/heartbeat`를 10분마다 호출 |
+| 로그아웃 시 | 세션 즉시 무효화 + 쿠키 삭제 |
+
+**역할별 접근 제어:**
 
 | 역할 | 접근 가능 경로 |
 |------|-------------|
@@ -126,14 +134,13 @@ POST /auth/login
 
 **Response 200**
 
+응답에 `Set-Cookie: JSESSIONID=...` 헤더가 포함됩니다.  
+브라우저가 이 쿠키를 저장하여 이후 모든 요청에 자동으로 포함합니다.
+
 ```json
 {
   "success": true,
   "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "tokenType": "Bearer",
-    "expiresIn": 3600,
     "member": {
       "id": 1,
       "username": "yunson",
@@ -155,19 +162,16 @@ POST /auth/login
 
 ---
 
-### 2-2. 토큰 갱신
+### 2-2. Heartbeat (세션 유지)
+
+사용자가 활성 상태인 동안 세션 TTL이 만료되지 않도록 초기화합니다.  
+클라이언트는 **10분마다** 이 엔드포인트를 호출해야 합니다.
 
 ```
-POST /auth/refresh
+POST /api/auth/heartbeat
 ```
 
-**Request Body**
-
-```json
-{
-  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
+> 인증 필요 (JSESSIONID 쿠키)
 
 **Response 200**
 
@@ -175,11 +179,14 @@ POST /auth/refresh
 {
   "success": true,
   "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "expiresIn": 3600
+    "sessionExpiresIn": 900
   }
 }
 ```
+
+| 필드 | 설명 |
+|------|------|
+| `sessionExpiresIn` | 초기화 후 남은 TTL(초), 항상 900 = 15분 |
 
 ---
 
@@ -187,10 +194,13 @@ POST /auth/refresh
 
 ```
 POST /auth/logout
-Authorization: Bearer {access_token}
 ```
 
+> 인증 필요 (JSESSIONID 쿠키)
+
 **Response 200**
+
+응답에서 `JSESSIONID` 쿠키가 삭제됩니다 (`Set-Cookie: JSESSIONID=; Max-Age=0`).
 
 ```json
 {
@@ -205,8 +215,9 @@ Authorization: Bearer {access_token}
 
 ```
 GET /auth/me
-Authorization: Bearer {access_token}
 ```
+
+> 인증 필요 (JSESSIONID 쿠키)
 
 **Response 200**
 
@@ -232,8 +243,9 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /auth/password
-Authorization: Bearer {access_token}
 ```
+
+> 인증 필요 (JSESSIONID 쿠키)
 
 **Request Body**
 
@@ -271,7 +283,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /api/systems
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -319,7 +330,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /api/query/extract
-Authorization: Bearer {access_token}
 Content-Type: application/json
 ```
 
@@ -373,7 +383,6 @@ Content-Type: application/json
 
 ```
 POST /api/query/visualize
-Authorization: Bearer {access_token}
 Content-Type: application/json
 ```
 
@@ -410,7 +419,6 @@ Content-Type: application/json
 
 ```
 GET /board
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -476,7 +484,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /board/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Path Parameters**
@@ -550,7 +557,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /board/{id}/download
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -576,7 +582,6 @@ iframe의 `src` 속성에 직접 사용하는 엔드포인트입니다.
 
 ```
 GET /board/{id}/html
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -614,8 +619,10 @@ X-Frame-Options: SAMEORIGIN
 ```
 WSS /ws
 Sec-WebSocket-Protocol: stomp
-Authorization: Bearer {access_token}
 ```
+
+인증은 `JSESSIONID` 쿠키로 처리됩니다 — Authorization 헤더 불필요.  
+브라우저가 WebSocket 핸드셰이크 시 쿠키를 자동으로 전송합니다.
 
 SockJS fallback URL: `https://your-domain.com/ws`
 
@@ -626,7 +633,7 @@ SockJS fallback URL: `https://your-domain.com/ws`
 ```javascript
 const client = new Client({
   webSocketFactory: () => new SockJS('/ws'),
-  connectHeaders: { Authorization: `Bearer ${accessToken}` },
+  // connectHeaders 불필요 — JSESSIONID 쿠키가 자동으로 전송됩니다
   onConnect: () => {
     client.subscribe(wsSubscribePath, (message) => {
       const payload = JSON.parse(message.body);
@@ -699,7 +706,6 @@ client.activate();
 
 ```
 GET /admin/members
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -738,7 +744,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/members
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -784,7 +789,6 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /admin/members/{id}/role
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -810,7 +814,6 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /admin/members/{id}/status
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -846,7 +849,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -883,7 +885,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/systems
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -944,7 +945,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -999,7 +999,6 @@ Authorization: Bearer {access_token}
 
 ```
 PUT /admin/systems/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Request Body** — 변경할 필드만 포함 (Partial Update)
@@ -1032,7 +1031,6 @@ Authorization: Bearer {access_token}
 
 ```
 DELETE /admin/systems/{id}
-Authorization: Bearer {access_token}
 ```
 
 삭제 시 아래 작업이 순서대로 실행됩니다.
@@ -1067,7 +1065,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/files
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1100,7 +1097,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/systems/{systemId}/files
-Authorization: Bearer {access_token}
 Content-Type: multipart/form-data
 ```
 
@@ -1142,7 +1138,6 @@ Content-Type: multipart/form-data
 
 ```
 DELETE /admin/systems/{systemId}/files/{fileId}
-Authorization: Bearer {access_token}
 ```
 
 파일 삭제 시 ChromaDB에서 해당 파일의 청크도 함께 삭제됩니다.
@@ -1167,7 +1162,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/systems/{systemId}/git/sync
-Authorization: Bearer {access_token}
 ```
 
 **Response 202** — 비동기 처리
@@ -1196,7 +1190,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/git/status
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1223,7 +1216,6 @@ Authorization: Bearer {access_token}
 
 ```
 POST /admin/systems/{systemId}/ingest
-Authorization: Bearer {access_token}
 ```
 
 **Request Body**
@@ -1265,7 +1257,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/ingest/status
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1317,7 +1308,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/jobs
-Authorization: Bearer {access_token}
 ```
 
 **Query Parameters**
@@ -1374,7 +1364,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/jobs/{id}
-Authorization: Bearer {access_token}
 ```
 
 **Response 200**
@@ -1408,7 +1397,6 @@ Authorization: Bearer {access_token}
 
 ```
 GET /admin/systems/{systemId}/jobs
-Authorization: Bearer {access_token}
 ```
 
 *11-1과 동일한 응답 구조, 해당 시스템의 작업만 반환*

@@ -169,17 +169,79 @@ CREATE TABLE members (
 CREATE TABLE member_tokens (
     id         BIGINT       NOT NULL AUTO_INCREMENT,
     member_id  BIGINT       NOT NULL,
-    token_type VARCHAR(30)  NOT NULL  COMMENT 'EMAIL_VERIFY|PASSWORD_RESET|REFRESH_TOKEN',
+    token_type VARCHAR(30)  NOT NULL  COMMENT 'EMAIL_VERIFY|PASSWORD_RESET',
     token_hash VARCHAR(255) NOT NULL  COMMENT 'SHA-256 hash (original not stored)',
     expires_at DATETIME     NOT NULL,
     used_at    DATETIME     NULL,
     created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT pk_member_tokens PRIMARY KEY (id),
     CONSTRAINT fk_member_tokens_member FOREIGN KEY (member_id) REFERENCES members(id)
-) COMMENT = 'Member tokens (email verification, password reset, Refresh Token)';
+) COMMENT = 'Member tokens (email verification, password reset only — auth uses Session)';
 ```
 
-### 4-2. Role-Based Access Control
+### 4-2. Authentication Design — Session + Redis
+
+Authentication uses **HTTP Session backed by Spring Session Data Redis**.  
+Access tokens (JWT/Bearer) are **not issued**. This API is internal-only and never exposed publicly.
+
+#### Auth Flow
+
+```
+[Login]
+  POST /auth/login {username, password}
+  → BCrypt password verification + account status check
+  → On success: create HttpSession → Spring Session stores it in Redis
+  → Return 200 (session cookie: JSESSIONID set in response)
+
+[Every Authenticated Request]
+  → Spring Security reads JSESSIONID from cookie
+  → Spring Session checks Redis for session data
+  → Session found  → Set SecurityContext → proceed
+  → Session not found → 401 Unauthorized
+
+[Logout]
+  POST /auth/logout
+  → session.invalidate() → delete from Redis immediately
+  → Clear JSESSIONID cookie
+
+[Heartbeat — keep-alive while the user is active]
+  POST /api/auth/heartbeat   (requires auth)
+  → Touching an authenticated endpoint resets the session TTL in Redis
+  → Client calls this every 10 minutes
+  → Session TTL resets to 15 minutes from the time of the call
+```
+
+#### Session Lifecycle
+
+| Item | Value |
+|------|-------|
+| Session TTL (max-inactive-interval) | **15 minutes** |
+| Heartbeat API call interval (client-side) | **every 10 minutes** |
+| TTL reset on heartbeat | Reset to **15 minutes** from call time |
+| TTL on logout | Deleted immediately |
+
+#### Why Redis (Redundancy Readiness)
+
+In a single-node setup the session exists only in Redis.  
+When scaling to multiple nodes (이중화), each node reads from the same Redis instance — no sticky sessions required.
+
+```yaml
+# application.yaml
+spring:
+  session:
+    store-type: redis
+    timeout: 15m
+    redis:
+      flush-mode: on-save
+      namespace: hyperion:session
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: 6379
+      password: ${REDIS_PASSWORD}
+```
+
+### 4-3. Role-Based Access Control
 
 | Feature | ADMIN | USER | VIEWER |
 |---------|:-----:|:----:|:------:|
@@ -825,8 +887,8 @@ After this, `docker compose down` → `docker compose up -d` will reuse the file
 ### 11-2. Pre-create Directories (Once on First Server Setup)
 
 ```bash
-sudo mkdir -p /data/{ollama,chromadb,mysql,systems,results} /tmp/nl-platform
-sudo chmod 755 /data/ollama /data/chromadb /data/mysql \
+sudo mkdir -p /data/{ollama,chromadb,mysql,redis,systems,results} /tmp/nl-platform
+sudo chmod 755 /data/ollama /data/chromadb /data/mysql /data/redis \
                /data/systems /data/results /tmp/nl-platform
 ```
 
@@ -907,6 +969,22 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── Redis (Session Store) ────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nlp-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"    # loopback only
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - /data/redis:/data         # persistent session data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ── Spring Boot 4 Application ────────────────────────────────────────
   app:
     build:
@@ -923,12 +1001,18 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
       # Platform meta DB
       SPRING_DATASOURCE_URL:      jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-nlplatform}?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8
       SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-nlpuser}
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
+      # Redis (Spring Session)
+      SPRING_DATA_REDIS_HOST:     redis
+      SPRING_DATA_REDIS_PORT:     6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
       # Ollama / ChromaDB
       APP_OLLAMA_BASE_URL:        http://ollama:11434
       APP_CHROMADB_BASE_URL:      http://chromadb:8000
@@ -959,6 +1043,9 @@ MYSQL_ROOT_PASSWORD=change_this_root_password
 MYSQL_DATABASE=nlplatform
 MYSQL_USER=nlpuser
 MYSQL_PASSWORD=change_this_db_password
+
+# Redis session store password
+REDIS_PASSWORD=change_this_redis_password
 
 # 32-byte AES key (generate: openssl rand -base64 32)
 TOKEN_ENCRYPTION_KEY=REPLACE_WITH_32_BYTE_BASE64_KEY_HERE
@@ -1070,6 +1157,7 @@ server {
 | Ollama | LLM inference + embedding API | Docker | ✅ |
 | ChromaDB | Vector DB | Docker | ✅ |
 | MySQL 8.0 | Platform meta DB | Docker | ✅ |
+| Redis 7 | Session store (Spring Session Data Redis) | Docker | ✅ |
 | Git | Source code clone/pull | Inside App container | ✅ |
 | NVIDIA Driver + CUDA | GPU acceleration | Host OS | GPU conditional |
 | Nginx | Reverse Proxy / SSL | Host OS | Recommended |
@@ -1109,11 +1197,12 @@ Client (Browser)  ─── HTTPS/WSS ───▶  Nginx :443 (host OS)
                                │                                            │
                                │  nlp-app :8080 (Spring Boot 4)            │
                                │  nlp-mysql :3306  nlp-chromadb :8000       │
-                               │  nlp-ollama :11434                         │
+                               │  nlp-ollama :11434  nlp-redis :6379        │
                                │                                            │
                                │  /data/ollama   → nlp-ollama (mount)       │
                                │  /data/chromadb → nlp-chromadb (mount)     │
                                │  /data/mysql    → nlp-mysql (mount)        │
+                               │  /data/redis    → nlp-redis (mount)        │
                                │  /data/systems  → nlp-app (mount)          │
                                │  /data/results  → nlp-app (mount)          │
                                └───────────────────────────────────────────┘
@@ -1136,6 +1225,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-mustache")
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    implementation("org.springframework.session:spring-session-data-redis")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
@@ -1211,6 +1302,11 @@ POST /api/query/visualize {systemId, naturalLanguage}
 ### 17-3. Full Admin API List
 
 ```
+Auth:        POST /auth/login           {username, password} → set JSESSIONID cookie
+             POST /auth/logout          invalidate session + clear cookie
+             POST /api/auth/heartbeat   reset session TTL (call every 10 min)
+             GET  /auth/me              return current member info
+
 Members:     GET/POST /admin/members
              PUT /admin/members/{id}/role|status
 
@@ -1250,6 +1346,9 @@ Board:       GET /board                list
 | Unauthorized admin access | ADMIN role + Spring Security |
 | Container port exposure | Docker ports → 127.0.0.1 binding (block external) |
 | Brute-force login | 5 failures → set lockedUntil |
+| Session hijacking | HTTPS only (Secure cookie), HttpOnly cookie, SameSite=Strict |
+| Session fixation | Spring Security invalidates old session on login (default behavior) |
+| Redis exposure | Password protected, loopback-only port (127.0.0.1:6379) |
 | iframe XSS | sandbox="allow-scripts" only |
 
 ---
@@ -1274,8 +1373,9 @@ Oracle/MSSQL EXPLAIN parsing is significantly more complex than MySQL/PostgreSQL
 
 ```
 Phase 1 — Infrastructure + Domain Foundation (3 weeks)
-  ├── Docker Compose environment setup + model download
-  ├── Member entity + Spring Security
+  ├── Docker Compose environment setup + model download (incl. Redis)
+  ├── Member entity + Spring Security + Spring Session Data Redis
+  ├── Session-based authentication (login/logout/heartbeat API)
   ├── TargetSystem + SystemFile entities
   ├── DynamicDataSourceFactory + TokenEncryptor
   └── SystemDirectoryManager + ChromaDB collection management

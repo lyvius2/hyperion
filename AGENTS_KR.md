@@ -11,8 +11,9 @@
 | 문서 | 설명 |
 |-|-|
 | [ARCHITECTURE_DESIGN_KR.md](./docs/ARCHITECTURE_DESIGN_KR.md)| 전체 시스템 아키텍처, 도메인 모델, 인프라, 임베딩 파이프라인 설계 |
-| [DATABASE_SCHEMA_KR.md](./docs/DATABASE_SCHEMA_KR.md)| NL-to-SQL 데이터 플랫폼의 플랫폼 메타 DB 스키마를 정의                                                   |
+| [DATABASE_SCHEMA_KR.md](./docs/DATABASE_SCHEMA_KR.md)| NL-to-SQL 데이터 플랫폼의 플랫폼 메타 DB 스키마를 정의 |
 | [API_SPECIFICATION_KR.md](./docs/API_SPECIFICATION_KR.md)| 전체 REST API 및 WebSocket 프로토콜 명세 |
+| [UI_UX_DESIGN_KR.md](./docs/UI_UX_DESIGN_KR.md) | UI/UX 설계 |
 
 코드를 작성하기 전에 반드시 두 문서를 확인합니다. 설계 문서와 충돌하는 구현은 허용하지 않습니다.
 
@@ -666,6 +667,40 @@ log.error("API Key: $apiKey", e)
 // .env
 // **/application-prod.yml
 // **/*-secret.yml
+```
+
+### 9-5. 세션 인증 규칙
+
+이 프로젝트는 인증에 **Spring Session Data Redis**로 백업되는 **HTTP Session**을 사용합니다.  
+액세스 토큰(JWT/Bearer)은 **발급하지 않습니다**. 이 API는 내부 전용이며 외부에 공개하지 않습니다.
+
+```kotlin
+// ✅ 필수: Spring Session + Redis 설정
+// application.yaml
+// spring.session.store-type: redis
+// spring.session.timeout: 15m
+
+// ✅ 필수: 세션 기반 인증 흐름
+// 로그인  → HttpSession 생성 → Spring Session이 Redis에 저장 → JSESSIONID 쿠키 반환
+// 요청    → JSESSIONID 읽기 → Spring Session이 Redis에서 조회 → 있으면 인증 / 없으면 401
+// 로그아웃 → session.invalidate() → Redis에서 즉시 삭제
+
+// ✅ 필수: 세션 유지를 위한 Heartbeat API
+// 클라이언트가 10분마다 POST /api/auth/heartbeat 호출
+// 인증된 요청이면 Redis의 TTL을 15분으로 재설정
+
+// ✅ 필수: 보안 쿠키 설정
+// server.servlet.session.cookie.http-only=true
+// server.servlet.session.cookie.secure=true   (HTTPS 전용)
+// server.servlet.session.cookie.same-site=Strict
+```
+
+```
+❌ 금지: 인증 목적으로 JWT 또는 Bearer 액세스 토큰 발급
+❌ 금지: Redis 백업 없이 JVM 힙에만 세션 데이터 저장
+❌ 금지: Redis 포트를 loopback 외부에 노출 (반드시 127.0.0.1 바인딩)
+❌ 금지: Redis를 비밀번호 없이 운영
+❌ 금지: member_tokens에 REFRESH_TOKEN 타입 사용 (세션이 토큰 인증을 대체)
 ```
 
 ---
