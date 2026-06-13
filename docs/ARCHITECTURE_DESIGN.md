@@ -1,0 +1,1313 @@
+# Hyperion, NL-to-SQL Data Platform — Architecture Design v7
+
+> Date: 2026-06-12  
+> Target: Kotlin + Spring Boot 4, Ollama (Local LLM), Monolithic SPA  
+> v7 Changes:
+> - **Embedding pipeline detailed design merged into main document**
+> - **Docker Compose configuration added** (Ollama + Spring Boot + ChromaDB + MySQL)
+> - **LLM model file storage location and initial setup procedure added**
+
+---
+
+[한국어(Korean) 문서](ARCHITECTURE_DESIGN_KR.md)
+
+## Table of Contents
+
+1. [Requirements Review](#1-requirements-review)
+2. [Key Design Decisions](#2-key-design-decisions)
+3. [Overall Domain Model Overview](#3-overall-domain-model-overview)
+4. [Domain 1 — Member](#4-domain-1--member)
+5. [Domain 2 — Target System](#5-domain-2--target-system)
+6. [Domain 3 — Result Board (QueryResult)](#6-domain-3--result-board-queryresult)
+7. [Domain 4 — Job History](#7-domain-4--job-history)
+8. [SQL Pre-validation Strategy — Single PROD DB Connection](#8-sql-pre-validation-strategy--single-prod-db-connection)
+9. [Embedding Pipeline (RAG Pre-work)](#9-embedding-pipeline-rag-pre-work)
+10. [RAG Runtime Search Flow](#10-rag-runtime-search-flow)
+11. [Docker Compose Configuration](#11-docker-compose-configuration)
+12. [Software Infrastructure Definition](#12-software-infrastructure-definition)
+13. [EC2 Instance Spec Recommendations](#13-ec2-instance-spec-recommendations)
+14. [System Architecture](#14-system-architecture)
+15. [Technology Stack and Dependencies](#15-technology-stack-and-dependencies)
+16. [Prompt Language Strategy](#16-prompt-language-strategy)
+17. [Functional Design Detail](#17-functional-design-detail)
+18. [Security Considerations](#18-security-considerations)
+19. [Non-Functional Requirements and Limitations](#19-non-functional-requirements-and-limitations)
+20. [Development Roadmap](#20-development-roadmap)
+
+---
+
+## 1. Requirements Review
+
+| # | Requirement | Status | Notes |
+|---|-------------|:------:|-------|
+| 2 | SQL/coding-specialized LLM model | ✅ | `deepseek-coder:6.7b` recommended |
+| 3 | Markdown + SQL DDL + source code RAG | ✅ | Dedicated chunking per type + embedding pipeline |
+| 4~7 | Natural language → SQL → Excel, async + WebSocket | ✅ | Spring WebSocket + Kotlin Coroutine |
+| 8~10 | Natural language → SQL → d3.js HTML → ZIP | ✅ | Two-stage LLM call |
+| 11 | Kotlin / Spring Boot 4 / Mustache monolithic | ✅ | |
+| v4 | Target system selection and management | ✅ | Per-system directory + ChromaDB isolation |
+| v5 | Result board (2-day retention) | ✅ | Soft delete + physical file deletion separated |
+| v6 | Single PROD DB connection (EXPLAIN pre-validation) | ✅ | |
+| v6 | Multi-DBMS support / Member / JobHistory domains | ✅ | |
+| **v7** | **Embedding pipeline detailed implementation design** | ✅ | 4 trigger scenarios, incremental update, batch processing |
+| **v7** | **Docker Compose** (Ollama+App+ChromaDB+MySQL) | ✅ | Model files on host volume mount |
+
+---
+
+## 2. Key Design Decisions
+
+### 2-1. Fine-tuning vs RAG — Understanding the Two Stages of RAG
+
+```
+━━━ Stage 1: Embedding (Pre-work — once + on every change) ━━━━━━━
+
+Documents/DDL/Code → Chunking → nomic-embed-text → Vectors → ChromaDB storage
+
+  · deepseek-coder is not involved in this stage at all
+  · This is NOT "memorizing" documents. It converts text into numerical coordinates
+  · When documents change, only re-embedding is needed — no retraining required
+
+━━━ Stage 2: RAG Runtime (on every user request) ━━━━━━━━━━━━━━━━━
+
+Question → nomic-embed-text → Vector → ChromaDB similarity search
+         → Retrieve 5~6 relevant chunks → Insert into prompt
+         → Call deepseek-coder → Generate SQL
+
+  · deepseek-coder reads the context fresh on every request and generates SQL
+  · Per-system ChromaDB collection isolation → No cross-system data contamination
+```
+
+### 2-2. DB Connection Architecture — Single PROD DB
+
+In most production environments, the PROD server cannot connect to a Dev DB.  
+`EXPLAIN` (no data reads) is used to pre-validate on the PROD DB, then execute on the same DB.
+
+---
+
+## 3. Overall Domain Model Overview
+
+```
+members ──(creator)──▶ target_systems ──1:N──▶ system_files
+   │                         │
+   └──(requester)──▶ query_results
+
+job_history  (history of all async operations, stack trace on failure)
+```
+
+### Full ERD (Summary)
+
+```
+members                    target_systems              system_files
+───────                    ──────────────              ────────────
+id PK                      id PK              ◀─1:N─  id PK
+username (unique)          name (unique)               system_id FK
+email (unique)             root_path                   original_filename
+password_hash (BCrypt)     chroma_collection            stored_path
+display_name               db_url                      file_type
+role (ADMIN|USER|VIEWER)   db_type                     file_size
+status                     db_username_enc (AES-GCM)   source_hash
+failed_login_count         db_password_enc (AES-GCM)   last_embedded_at
+locked_until               git_url                     embedded_chunk_count
+last_login_at              git_access_token_enc         uploaded_by FK
+email_verified             slack_webhook_url            uploaded_at
+created_at / updated_at    slack_enabled
+                           ingestion_status
+                           last_ingested_at
+                           total_chunk_count
+                           created_by FK / created_at / updated_at
+
+query_results                               job_history
+─────────────                               ───────────
+id PK (serial number)                       id PK
+system_id FK                                job_type
+requested_by FK                             reference_id / reference_type
+dataset_name (LLM-named)                    system_id FK
+natural_language                            triggered_by FK (NULL=scheduler)
+generated_sql                               status (RUNNING|SUCCESS|FAILED|SKIPPED)
+result_type (EXTRACT|VISUALIZE)             started_at / finished_at / duration_ms
+status (PROCESSING|COMPLETED|FAILED)        input_summary / output_summary
+file_path                                   error_code / error_message
+expires_at (requested_at + 2 days)          stack_trace (full text on failure)
+unused / file_deleted / file_deleted_at     created_at
+slack_sent / slack_sent_at
+error_message
+requested_at / updated_at
+```
+
+---
+
+## 4. Domain 1 — Member
+
+### 4-1. DDL
+
+```sql
+CREATE TABLE members (
+    id                  BIGINT       NOT NULL AUTO_INCREMENT   COMMENT 'Member PK',
+    username            VARCHAR(50)  NOT NULL                  COMMENT 'Login ID',
+    email               VARCHAR(200) NOT NULL                  COMMENT 'Email',
+    password_hash       VARCHAR(255) NOT NULL                  COMMENT 'BCrypt hash',
+    display_name        VARCHAR(100) NOT NULL                  COMMENT 'Display name',
+    role                VARCHAR(20)  NOT NULL DEFAULT 'USER'   COMMENT 'ADMIN|USER|VIEWER',
+    status              VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE|INACTIVE|LOCKED|WITHDRAWN',
+    profile_image_url   VARCHAR(500) NULL,
+    failed_login_count  INT          NOT NULL DEFAULT 0        COMMENT 'Consecutive login failure count',
+    locked_until        DATETIME     NULL                      COMMENT 'Lock release time (NULL=not locked)',
+    password_changed_at DATETIME     NULL,
+    last_login_at       DATETIME     NULL,
+    last_login_ip       VARCHAR(45)  NULL,
+    email_verified      CHAR(1)      NOT NULL DEFAULT 'N',
+    email_verified_at   DATETIME     NULL,
+    oauth_provider      VARCHAR(20)  NULL     COMMENT 'google|kakao|github',
+    oauth_provider_id   VARCHAR(200) NULL,
+    created_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT pk_members          PRIMARY KEY (id),
+    CONSTRAINT uq_members_username UNIQUE (username),
+    CONSTRAINT uq_members_email    UNIQUE (email)
+) COMMENT = 'Member information';
+
+CREATE TABLE member_tokens (
+    id         BIGINT       NOT NULL AUTO_INCREMENT,
+    member_id  BIGINT       NOT NULL,
+    token_type VARCHAR(30)  NOT NULL  COMMENT 'EMAIL_VERIFY|PASSWORD_RESET|REFRESH_TOKEN',
+    token_hash VARCHAR(255) NOT NULL  COMMENT 'SHA-256 hash (original not stored)',
+    expires_at DATETIME     NOT NULL,
+    used_at    DATETIME     NULL,
+    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT pk_member_tokens PRIMARY KEY (id),
+    CONSTRAINT fk_member_tokens_member FOREIGN KEY (member_id) REFERENCES members(id)
+) COMMENT = 'Member tokens (email verification, password reset, Refresh Token)';
+```
+
+### 4-2. Role-Based Access Control
+
+| Feature | ADMIN | USER | VIEWER |
+|---------|:-----:|:----:|:------:|
+| Register/edit/delete systems | ✅ | ❌ | ❌ |
+| Upload files / Git Sync / run embedding | ✅ | ❌ | ❌ |
+| Data extract / visualize requests | ✅ | ✅ | ❌ |
+| Board view | ✅ | ✅ | ✅ |
+| Member management | ✅ | ❌ | ❌ |
+
+---
+
+## 5. Domain 2 — Target System
+
+### 5-1. DDL
+
+```sql
+CREATE TABLE target_systems (
+    id                   BIGINT       NOT NULL AUTO_INCREMENT,
+    name                 VARCHAR(100) NOT NULL                  COMMENT 'System name (URL-safe)',
+    description          VARCHAR(500) NULL,
+    root_path            VARCHAR(500) NOT NULL                  COMMENT '/data/systems/{name}_{hash}/',
+    chroma_collection    VARCHAR(100) NOT NULL                  COMMENT 'sys_{name}_{hash}',
+    db_url               VARCHAR(500) NOT NULL                  COMMENT 'JDBC URL',
+    db_type              VARCHAR(20)  NOT NULL                  COMMENT 'MYSQL|MARIADB|ORACLE|POSTGRESQL|MSSQL',
+    db_username_enc      VARCHAR(500) NOT NULL                  COMMENT 'AES-GCM encrypted',
+    db_password_enc      VARCHAR(500) NOT NULL                  COMMENT 'AES-GCM encrypted',
+    git_url              VARCHAR(500) NULL,
+    git_access_token_enc VARCHAR(500) NULL                      COMMENT 'AES-GCM encrypted',
+    last_git_sync_at     DATETIME     NULL,
+    last_commit_hash     VARCHAR(40)  NULL,
+    slack_webhook_url    VARCHAR(500) NULL,
+    slack_enabled        CHAR(1)      NOT NULL DEFAULT 'N',
+    ingestion_status     VARCHAR(20)  NOT NULL DEFAULT 'NONE'   COMMENT 'NONE|RUNNING|COMPLETED|FAILED',
+    last_ingested_at     DATETIME     NULL,
+    total_chunk_count    INT          NOT NULL DEFAULT 0,
+    created_by           BIGINT       NOT NULL,
+    created_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT pk_target_systems    PRIMARY KEY (id),
+    CONSTRAINT uq_target_systems_name   UNIQUE (name),
+    CONSTRAINT uq_target_systems_chroma UNIQUE (chroma_collection),
+    CONSTRAINT fk_target_systems_member FOREIGN KEY (created_by) REFERENCES members(id)
+) COMMENT = 'Target analysis system';
+
+CREATE TABLE system_files (
+    id                   BIGINT       NOT NULL AUTO_INCREMENT,
+    system_id            BIGINT       NOT NULL,
+    original_filename    VARCHAR(255) NOT NULL,
+    stored_path          VARCHAR(500) NOT NULL,
+    file_type            VARCHAR(20)  NOT NULL   COMMENT 'MARKDOWN|SQL_DDL',
+    file_size            BIGINT       NOT NULL,
+    source_hash          VARCHAR(64)  NULL        COMMENT 'SHA-256 for change detection',
+    last_embedded_at     DATETIME     NULL,
+    embedded_chunk_count INT          NOT NULL DEFAULT 0,
+    uploaded_by          BIGINT       NOT NULL,
+    uploaded_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT pk_system_files PRIMARY KEY (id),
+    CONSTRAINT fk_system_files_system FOREIGN KEY (system_id)   REFERENCES target_systems(id),
+    CONSTRAINT fk_system_files_member FOREIGN KEY (uploaded_by) REFERENCES members(id)
+) COMMENT = 'System uploaded files';
+```
+
+### 5-2. Server Directory Structure
+
+```
+/data/systems/
+├── hexa_a3f2b1c4/
+│   ├── docs/           ← uploaded .md files
+│   ├── ddl/            ← uploaded .sql files
+│   └── sourcetree/     ← git clone target
+│       └── .ingestion-ignore
+└── kooroo-bss_7d1e3a9b/
+    ├── docs/ / ddl/ / sourcetree/
+```
+
+### 5-3. Dynamic DataSource Creation
+
+```kotlin
+@Component
+class DynamicDataSourceFactory(private val tokenEncryptor: TokenEncryptor) {
+    private val cache = ConcurrentHashMap<Long, DataSource>()
+
+    fun getDataSource(system: TargetSystem): DataSource =
+        cache.getOrPut(system.id) { createDataSource(system) }
+
+    fun invalidate(systemId: Long) = cache.remove(systemId)
+
+    private fun createDataSource(system: TargetSystem) = HikariDataSource(HikariConfig().apply {
+        jdbcUrl         = system.dbUrl
+        driverClassName = system.dbType.toDriverClassName()
+        username        = tokenEncryptor.decrypt(system.dbUsernameEnc)
+        password        = tokenEncryptor.decrypt(system.dbPasswordEnc)
+        maximumPoolSize = 5
+        minimumIdle     = 1
+        connectionTimeout = 10_000
+        poolName        = "pool-${system.name}"
+    })
+}
+
+enum class DbType {
+    MYSQL, MARIADB, ORACLE, POSTGRESQL, MSSQL;
+    fun toDriverClassName() = when (this) {
+        MYSQL      -> "com.mysql.cj.jdbc.Driver"
+        MARIADB    -> "org.mariadb.jdbc.Driver"
+        ORACLE     -> "oracle.jdbc.OracleDriver"
+        POSTGRESQL -> "org.postgresql.Driver"
+        MSSQL      -> "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+    }
+}
+```
+
+---
+
+## 6. Domain 3 — Result Board (QueryResult)
+
+### 6-1. DDL
+
+```sql
+CREATE TABLE query_results (
+    id               BIGINT       NOT NULL AUTO_INCREMENT  COMMENT 'Serial number',
+    system_id        BIGINT       NOT NULL,
+    requested_by     BIGINT       NOT NULL,
+    dataset_name     VARCHAR(200) NOT NULL                 COMMENT 'LLM-named dataset (max 30 chars)',
+    natural_language TEXT         NOT NULL,
+    generated_sql    TEXT         NULL,
+    result_type      VARCHAR(20)  NOT NULL                 COMMENT 'EXTRACT|VISUALIZE',
+    status           VARCHAR(20)  NOT NULL DEFAULT 'PROCESSING'  COMMENT 'PROCESSING|COMPLETED|FAILED',
+    file_path        VARCHAR(500) NULL,
+    expires_at       DATETIME     NOT NULL                 COMMENT 'requested_at + 2 days',
+    unused           CHAR(1)      NOT NULL DEFAULT 'N'     COMMENT 'Y=hidden (record not deleted from DB)',
+    file_deleted     CHAR(1)      NOT NULL DEFAULT 'N',
+    file_deleted_at  DATETIME     NULL,
+    slack_sent       CHAR(1)      NOT NULL DEFAULT 'N',
+    slack_sent_at    DATETIME     NULL,
+    error_message    TEXT         NULL,
+    requested_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT pk_query_results PRIMARY KEY (id),
+    CONSTRAINT fk_qr_system FOREIGN KEY (system_id)    REFERENCES target_systems(id),
+    CONSTRAINT fk_qr_member FOREIGN KEY (requested_by) REFERENCES members(id)
+) COMMENT = 'Query request result board (2-day retention)';
+
+CREATE INDEX idx_qr_system  ON query_results (system_id, requested_at DESC);
+CREATE INDEX idx_qr_expires ON query_results (expires_at, file_deleted);
+```
+
+---
+
+## 7. Domain 4 — Job History
+
+### 7-1. DDL
+
+```sql
+CREATE TABLE job_history (
+    id              BIGINT        NOT NULL AUTO_INCREMENT,
+    job_type        VARCHAR(50)   NOT NULL  COMMENT 'QUERY_EXTRACT|QUERY_VISUALIZE|SQL_EXPLAIN|INGESTION_FULL|INGESTION_INCREMENTAL|INGESTION_SINGLE_FILE|GIT_CLONE|GIT_PULL|FILE_CLEANUP|SLACK_NOTIFY',
+    reference_id    BIGINT        NULL,
+    reference_type  VARCHAR(50)   NULL,
+    system_id       BIGINT        NULL,
+    triggered_by    BIGINT        NULL      COMMENT 'NULL=scheduler',
+    status          VARCHAR(20)   NOT NULL DEFAULT 'RUNNING'  COMMENT 'RUNNING|SUCCESS|FAILED|SKIPPED',
+    started_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at     DATETIME      NULL,
+    duration_ms     BIGINT        NULL,
+    input_summary   VARCHAR(1000) NULL,
+    output_summary  VARCHAR(1000) NULL,
+    error_code      VARCHAR(100)  NULL      COMMENT 'Exception class name',
+    error_message   VARCHAR(2000) NULL,
+    stack_trace     TEXT          NULL      COMMENT 'Full stack trace on failure',
+    created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT pk_job_history PRIMARY KEY (id),
+    CONSTRAINT fk_jh_system FOREIGN KEY (system_id)    REFERENCES target_systems(id) ON DELETE SET NULL,
+    CONSTRAINT fk_jh_member FOREIGN KEY (triggered_by) REFERENCES members(id)        ON DELETE SET NULL
+) COMMENT = 'Job execution history';
+
+CREATE INDEX idx_jh_type   ON job_history (job_type, started_at DESC);
+CREATE INDEX idx_jh_system ON job_history (system_id, started_at DESC);
+CREATE INDEX idx_jh_status ON job_history (status, started_at DESC);
+```
+
+### 7-2. Helper Pattern
+
+```kotlin
+// Used consistently across all async operations
+val job = jobHistoryService.start(JobType.QUERY_EXTRACT, system, member, inputSummary = nl.take(200))
+runCatching {
+    // ... perform work ...
+    jobHistoryService.complete(job, "rows=1234")
+}.onFailure { e ->
+    jobHistoryService.fail(job, e)  // error_code, error_message, stack_trace saved automatically
+    throw e
+}
+```
+
+---
+
+## 8. SQL Pre-validation Strategy — Single PROD DB Connection
+
+### 8-1. Three-Layer Defense
+
+```
+LLM-generated SQL
+      │
+      ▼ Layer 1 — Static Analysis (no execution)
+        · Enforce SELECT only    · Block forbidden keywords
+        · Block multiple statements (;)  · Enforce LIMIT 10,000
+      │ Pass
+      ▼ Layer 2 — EXPLAIN (PROD DB, no data reads)
+        · Extract query_cost / rows_examined / access_type
+        · Detect Full Table Scan, filesort, temporary table
+      │
+      ├── REJECT → QueryTooExpensiveException
+      ├── WARN   → Re-query LLM for optimization
+      └── PASS   → Execute on PROD DB
+```
+
+### 8-2. EXPLAIN Syntax per DBMS and Thresholds
+
+| DBMS | Syntax | Cost Path |
+|------|--------|---------|
+| MySQL / MariaDB | `EXPLAIN FORMAT=JSON {sql}` | `$.query_block.cost_info.query_cost` |
+| PostgreSQL | `EXPLAIN (FORMAT JSON, COSTS TRUE) {sql}` | `$[0].Plan."Total Cost"` |
+| Oracle | `EXPLAIN PLAN FOR {sql}` → DBMS_XPLAN | Text parsing |
+| MS SQL Server | `SET SHOWPLAN_XML ON` then execute | XML parsing |
+
+| Metric | PASS | WARN | REJECT |
+|--------|:----:|:----:|:------:|
+| `query_cost` | < 10,000 | ~50,000 | > 50,000 |
+| `rows_examined` | < 100,000 | ~1,000,000 | > 1,000,000 |
+| `access_type` | range or better | — | ALL (Full Scan) |
+
+---
+
+## 9. Embedding Pipeline (RAG Pre-work)
+
+### 9-1. Separation of Roles Between Two Models
+
+| Model | Stage | Role |
+|-------|-------|------|
+| `nomic-embed-text` | Pre-embedding + runtime query conversion | Converts text → 384-dimension vectors only |
+| `deepseek-coder:6.7b` | Runtime SQL/HTML generation | Reads prompt context and generates SQL on the spot |
+
+### 9-2. Full Pipeline Flow
+
+```
+/data/systems/{name}_{hash}/docs/ ddl/ sourcetree/
+          │
+          ▼ 1. Enumerate files + apply .ingestion-ignore
+          ▼ 2. Type-specific chunking
+               .md   → MarkdownChunker  (## heading boundary, re-split by paragraph if >512 tokens)
+               .sql  → SqlDdlChunker    (entire CREATE TABLE = 1 chunk, synthesize DDL + description)
+               .java/.kt → SourceCodeChunker (JavaParser AST, method-level)
+          ▼ 3. SHA-256 hash → SKIP if unchanged
+          ▼ 4. Ollama nomic-embed-text (batches of 10)
+               text → FloatArray(384 dimensions)
+          ▼ 5. ChromaDB upsert (batches of 100)
+               collection: sys_{name}_{hash}
+               stored: vector + original text + metadata (type, source_path, table_name, etc.)
+          ▼ 6. Update SystemFile.lastEmbeddedAt + complete JobHistory
+```
+
+### 9-3. Four Trigger Scenarios
+
+| Scenario | Trigger | Scope |
+|----------|---------|-------|
+| A. After file upload | Automatically after `POST /admin/systems/{id}/files` | That file only |
+| B. After Git Sync | Automatically after `POST /admin/systems/{id}/git/sync` | Changed files only |
+| C. Manual admin | `POST /admin/systems/{id}/ingest` | FULL or INCREMENTAL |
+| D. On app startup | `@EventListener(ApplicationReadyEvent)` | Systems with `ingestionStatus=NONE` only |
+
+### 9-4. Source Type Chunking Detail
+
+#### MarkdownChunker
+
+```kotlin
+@Component
+class MarkdownChunker : DocumentChunker {
+    override fun chunk(file: File, system: TargetSystem): List<DocumentChunk> {
+        val content      = file.readText(Charsets.UTF_8)
+        val relativePath = file.relativeTo(File(system.rootPath)).path
+        return splitByHeadings(content).flatMapIndexed { idx, section ->
+            val subChunks = if (estimateTokens(section.text) > 512)
+                splitByParagraph(section.text).mapIndexed { i, t -> "${idx}_$i" to t }
+            else listOf("$idx" to section.text)
+            subChunks.map { (subIdx, text) ->
+                DocumentChunk(
+                    id   = generateId(system.id, relativePath, subIdx.hashCode()),
+                    text = text.trim(),
+                    metadata = mapOf("system_id" to system.id.toString(),
+                                     "type" to "markdown",
+                                     "source_path" to relativePath,
+                                     "heading" to (section.headingPath ?: ""),
+                                     "category" to inferCategory(relativePath)),
+                    sourceHash = sha256(text)
+                )
+            }
+        }
+    }
+    // splitByHeadings: splits sections by ## or # heading boundaries
+    // inferCategory: infers from whether path contains schema/business/glossary/architecture
+}
+```
+
+#### SqlDdlChunker
+
+```kotlin
+@Component
+class SqlDdlChunker : DocumentChunker {
+    private val DDL_PATTERN = Regex(
+        """(CREATE\s+TABLE[\s\S]+?;|ALTER\s+TABLE[\s\S]+?;|CREATE\s+(?:UNIQUE\s+)?INDEX[\s\S]+?;)""",
+        RegexOption.IGNORE_CASE
+    )
+    override fun chunk(file: File, system: TargetSystem): List<DocumentChunk> {
+        val relativePath = file.relativeTo(File(system.rootPath)).path
+        return DDL_PATTERN.findAll(file.readText()).mapIndexed { i, match ->
+            val ddl = match.value.trim()
+            val tableName = extractTableName(ddl)
+            // Synthesize DDL + description → maps natural language queries to English DDL column names
+            val embeddingText = """
+                Table name: $tableName
+                Description: ${extractTableComment(ddl) ?: tableName}
+                Key columns: ${extractColumnSummary(ddl)}
+                DDL:
+                $ddl
+            """.trimIndent()
+            DocumentChunk(
+                id   = generateId(system.id, relativePath, i),
+                text = embeddingText,
+                metadata = mapOf("system_id" to system.id.toString(),
+                                 "type" to "sql_ddl",
+                                 "source_path" to relativePath,
+                                 "table_name" to tableName,
+                                 "columns" to extractColumnNames(ddl).joinToString(",")),
+                sourceHash = sha256(ddl)
+            )
+        }.toList()
+    }
+}
+```
+
+#### SourceCodeChunker (JavaParser-based, method-level)
+
+```kotlin
+@Component
+class SourceCodeChunker(
+    private val javaExtractor: JavaMethodExtractor,
+    private val kotlinExtractor: KotlinMethodExtractor
+) : DocumentChunker {
+    override fun chunk(file: File, system: TargetSystem): List<DocumentChunk> {
+        if (!shouldIngest(file, system)) return emptyList()
+        val relativePath = file.relativeTo(File(system.rootPath)).path
+        val methods = when (file.extension.lowercase()) {
+            "java" -> javaExtractor.extract(file)
+            "kt"   -> kotlinExtractor.extract(file)
+            else   -> return emptyList()
+        }
+        return methods.mapIndexed { i, method ->
+            // Synthesize class context + annotations + method body
+            val enrichedText = buildString {
+                appendLine("// File: $relativePath")
+                appendLine("// Class: ${method.className}  Package: ${method.packageName}")
+                if (method.annotations.isNotEmpty())
+                    appendLine("// Annotations: ${method.annotations.joinToString(", ")}")
+                appendLine("// Method: ${method.signature}")
+                append(method.fullText)
+            }
+            DocumentChunk(
+                id   = generateId(system.id, "$relativePath#${method.name}", i),
+                text = enrichedText,
+                metadata = mapOf("system_id" to system.id.toString(),
+                                 "type" to "source_code",
+                                 "source_path" to relativePath,
+                                 "class_name" to method.className,
+                                 "method_name" to method.name,
+                                 "layer" to inferLayer(relativePath)),
+                sourceHash = sha256(method.fullText)
+            )
+        }
+    }
+    // shouldIngest: applies .ingestion-ignore + prioritizes Service/Repository/Domain/DTO layers
+    // inferLayer: infers from whether path contains /service/ /repository/ /domain/ /dto/
+}
+```
+
+### 9-5. OllamaClient — Embedding + Inference
+
+```kotlin
+@Component
+class OllamaClient(@Value("\${app.ollama.base-url}") private val baseUrl: String,
+                   private val webClient: WebClient) {
+
+    // ── Embedding (pre-work + runtime query conversion) ─────────────────
+    suspend fun embed(text: String): FloatArray {
+        val res = webClient.post().uri("$baseUrl/api/embeddings")
+            .bodyValue(mapOf("model" to "nomic-embed-text", "prompt" to text))
+            .retrieve().awaitBody<EmbeddingResponse>()
+        return res.embedding.toFloatArray()
+    }
+
+    // Ollama does not support batch API → process sequentially in groups of 10
+    suspend fun embedBatch(texts: List<String>): List<FloatArray> =
+        texts.chunked(10).flatMap { batch -> batch.map { embed(it) } }
+
+    // ── SQL/HTML generation (runtime) ──────────────────────────────────
+    suspend fun generate(prompt: String, temperature: Double = 0.1): String {
+        val res = webClient.post().uri("$baseUrl/api/generate")
+            .bodyValue(mapOf(
+                "model"   to "deepseek-coder:6.7b",
+                "prompt"  to prompt,
+                "stream"  to false,
+                "options" to mapOf("temperature" to temperature, "num_predict" to 1024)
+            ))
+            .retrieve().awaitBody<GenerateResponse>()
+        return res.response.trim()
+    }
+
+    data class EmbeddingResponse(val embedding: List<Float>)
+    data class GenerateResponse(val response: String)
+}
+```
+
+### 9-6. ChromaDbClient — Storage and Search
+
+```kotlin
+@Component
+class ChromaDbClient(@Value("\${app.chromadb.base-url}") private val baseUrl: String,
+                     private val webClient: WebClient) {
+
+    // upsert (batches of 100)
+    suspend fun upsert(collection: String, chunks: List<DocumentChunk>, embeddings: List<FloatArray>) {
+        chunks.zip(embeddings).chunked(100).forEach { batch ->
+            webClient.post().uri("$baseUrl/api/v1/collections/$collection/upsert")
+                .bodyValue(mapOf(
+                    "ids"        to batch.map { it.first.id },
+                    "embeddings" to batch.map { it.second.toList() },
+                    "documents"  to batch.map { it.first.text },
+                    "metadatas"  to batch.map {
+                        it.first.metadata + mapOf("source_hash" to it.first.sourceHash) }
+                )).retrieve().awaitBodilessEntity()
+        }
+    }
+
+    // Similarity search (runtime — called on every request)
+    suspend fun query(collection: String, queryEmbedding: FloatArray,
+                      topK: Int = 6, typeFilter: List<String>? = null): List<RetrievedChunk> {
+        val body = mutableMapOf<String, Any>(
+            "query_embeddings" to listOf(queryEmbedding.toList()),
+            "n_results"        to topK,
+            "include"          to listOf("documents", "metadatas", "distances")
+        )
+        if (typeFilter != null) body["where"] = mapOf("type" to mapOf("\$in" to typeFilter))
+
+        val res = webClient.post().uri("$baseUrl/api/v1/collections/$collection/query")
+            .bodyValue(body).retrieve().awaitBody<QueryResponse>()
+
+        return res.documents.first().zip(res.metadatas.first()).zip(res.distances.first())
+            .map { (dm, dist) -> RetrievedChunk(dm.first, dm.second, 1.0 - dist) }
+            .filter { it.similarity > 0.3 }   // Filter out low-similarity chunks
+    }
+
+    // Delete existing chunks before re-ingestion
+    suspend fun deleteBySourcePath(collection: String, sourcePath: String) {
+        webClient.post().uri("$baseUrl/api/v1/collections/$collection/delete")
+            .bodyValue(mapOf("where" to mapOf("source_path" to mapOf("\$eq" to sourcePath))))
+            .retrieve().awaitBodilessEntity()
+    }
+
+    data class QueryResponse(val documents: List<List<String>>,
+                             val metadatas: List<List<Map<String,String>>>,
+                             val distances: List<List<Double>>)
+    data class RetrievedChunk(val text: String, val metadata: Map<String,String>,
+                               val similarity: Double)
+}
+```
+
+### 9-7. DocumentIngestionPipeline — Pipeline Assembly
+
+```kotlin
+@Service
+class DocumentIngestionPipeline(
+    private val markdownChunker: MarkdownChunker,
+    private val sqlDdlChunker: SqlDdlChunker,
+    private val sourceCodeChunker: SourceCodeChunker,
+    private val ollamaClient: OllamaClient,
+    private val chromaDbClient: ChromaDbClient,
+    private val systemRepo: TargetSystemRepository,
+    private val fileRepo: SystemFileRepository,
+    private val jobHistoryService: JobHistoryService
+) {
+    @OptIn(DelicateCoroutinesApi::class)
+    fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
+        GlobalScope.launch(Dispatchers.IO) { run(system, mode, triggeredBy) }
+    }
+
+    suspend fun run(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
+        val job = jobHistoryService.start(
+            if (mode == IngestionMode.FULL) JobType.INGESTION_FULL
+            else JobType.INGESTION_INCREMENTAL, system, triggeredBy)
+        systemRepo.save(system.copy(ingestionStatus = IngestionStatus.RUNNING))
+
+        runCatching {
+            val files = collectFiles(File(system.rootPath), mode, system)
+            var totalChunks = 0
+            files.forEach { file ->
+                val chunks = chunkFile(file, system)
+                if (chunks.isEmpty()) return@forEach
+                val relPath = file.relativeTo(File(system.rootPath)).path
+                chromaDbClient.deleteBySourcePath(system.chromaCollection, relPath) // delete before re-ingest
+                val embeddings = ollamaClient.embedBatch(chunks.map { it.text })
+                chromaDbClient.upsert(system.chromaCollection, chunks, embeddings)
+                totalChunks += chunks.size
+                // Update SystemFile status
+                fileRepo.findBySystemIdAndStoredPath(system.id, relPath)?.let {
+                    fileRepo.save(it.copy(lastEmbeddedAt = LocalDateTime.now(),
+                                          embeddedChunkCount = chunks.size,
+                                          sourceHash = sha256(file.readText())))
+                }
+            }
+            systemRepo.save(system.copy(ingestionStatus = IngestionStatus.COMPLETED,
+                                         lastIngestedAt = LocalDateTime.now(),
+                                         totalChunkCount = totalChunks))
+            jobHistoryService.complete(job, "${files.size} files, $totalChunks chunks")
+        }.onFailure { e ->
+            systemRepo.save(system.copy(ingestionStatus = IngestionStatus.FAILED))
+            jobHistoryService.fail(job, e)
+        }
+    }
+
+    // Single file ingestion (called automatically after file upload)
+    suspend fun ingestSingleFile(file: File, system: TargetSystem, triggeredBy: Member?) {
+        val job = jobHistoryService.start(JobType.INGESTION_SINGLE_FILE, system, triggeredBy,
+                                          inputSummary = file.name)
+        runCatching {
+            val chunks = chunkFile(file, system)
+            val relPath = file.relativeTo(File(system.rootPath)).path
+            chromaDbClient.deleteBySourcePath(system.chromaCollection, relPath)
+            chromaDbClient.upsert(system.chromaCollection, chunks,
+                                  ollamaClient.embedBatch(chunks.map { it.text }))
+            jobHistoryService.complete(job, "${chunks.size} chunks")
+        }.onFailure { jobHistoryService.fail(job, it) }
+    }
+
+    private fun collectFiles(root: File, mode: IngestionMode, system: TargetSystem): List<File> {
+        val all = root.walkTopDown().filter { it.isFile }
+            .filter { it.extension.lowercase() in setOf("md","sql","java","kt") }
+            .filter { !it.path.contains("/.git/") }.toList()
+        if (mode == IngestionMode.FULL) return all
+        val since = system.lastIngestedAt ?: return all
+        return all.filter { it.lastModified() > since.toInstant(ZoneOffset.UTC).toEpochMilli() }
+    }
+
+    private fun chunkFile(file: File, system: TargetSystem) = when (file.extension.lowercase()) {
+        "md"         -> markdownChunker.chunk(file, system)
+        "sql"        -> sqlDdlChunker.chunk(file, system)
+        "java", "kt" -> sourceCodeChunker.chunk(file, system)
+        else         -> emptyList()
+    }
+}
+```
+
+### 9-8. Incremental Update — SHA-256 Double Check
+
+```
+File modification time > lastIngestedAt?
+  No  → SKIP
+  Yes → Calculate SHA-256 → Compare with ChromaDB source_hash
+           Same → SKIP (time differs but content identical)
+           Different → Delete existing chunks → Re-chunk → Re-embed → upsert
+```
+
+---
+
+## 10. RAG Runtime Search Flow
+
+```kotlin
+suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
+    // ① Convert question to vector
+    val queryVector = ollamaClient.embed(naturalLanguage)
+
+    // ② Weighted search by type (SQL generation: DDL first)
+    val chunks = chromaDbClient.query(system.chromaCollection, queryVector, topK=3,
+                    typeFilter=listOf("sql_ddl")) +
+                 chromaDbClient.query(system.chromaCollection, queryVector, topK=2,
+                    typeFilter=listOf("source_code")) +
+                 chromaDbClient.query(system.chromaCollection, queryVector, topK=1,
+                    typeFilter=listOf("markdown"))
+
+    // ③ Remove low-similarity chunks and assemble context
+    val context = chunks.sortedByDescending { it.similarity }
+                        .joinToString("\n\n---\n\n") { it.text }
+
+    // ④ English prompt + call deepseek-coder
+    return ollamaClient.generate("""
+        [SYSTEM]
+        You are an expert SQL generator for the "${system.name}" system.
+        Target DBMS: ${system.dbType}
+        Use ONLY the context below. Generate ONLY a valid SQL SELECT statement.
+        If not about data extraction, respond EXACTLY: "데이터 추출 요구 아님"
+
+        [CONTEXT — retrieved from knowledge base]
+        $context
+
+        [USER REQUEST]
+        $naturalLanguage
+    """.trimIndent())
+}
+```
+
+---
+
+## 11. Docker Compose Configuration
+
+### 11-1. LLM Model File Storage Location
+
+> **Ollama model files must be stored in the host directory `/data/ollama`.**  
+> Even if containers are recreated or updated, models do not need to be re-downloaded.
+
+```
+/data/ollama/                     ← host directory (mounted into container)
+└── models/
+    ├── manifests/
+    │   └── registry.ollama.ai/library/
+    │       ├── deepseek-coder/   ← model metadata
+    │       └── nomic-embed-text/
+    └── blobs/                    ← actual weight files
+        ├── sha256-xxxx...        ← deepseek-coder:6.7b (~3.8GB)
+        └── sha256-yyyy...        ← nomic-embed-text (~274MB)
+```
+
+**Initial model download — run only once after first container startup:**
+
+```bash
+# Run inside the Ollama container
+docker compose exec ollama ollama pull deepseek-coder:6.7b   # ~3.8GB, 10~20 min
+docker compose exec ollama ollama pull nomic-embed-text       # ~274MB, 1~2 min
+
+# Verify
+docker compose exec ollama ollama list
+```
+
+After this, `docker compose down` → `docker compose up -d` will reuse the files stored in `/data/ollama`.
+
+### 11-2. Pre-create Directories (Once on First Server Setup)
+
+```bash
+sudo mkdir -p /data/{ollama,chromadb,mysql,systems,results} /tmp/nl-platform
+sudo chmod 755 /data/ollama /data/chromadb /data/mysql \
+               /data/systems /data/results /tmp/nl-platform
+```
+
+### 11-3. docker-compose.yml
+
+```yaml
+services:
+
+  # ── MySQL (Platform Meta DB) ──────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: nlp-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE:      ${MYSQL_DATABASE:-nlplatform}
+      MYSQL_USER:          ${MYSQL_USER:-nlpuser}
+      MYSQL_PASSWORD:      ${MYSQL_PASSWORD}
+      TZ: Asia/Seoul
+    ports:
+      - "127.0.0.1:3306:3306"         # loopback only
+    volumes:
+      - /data/mysql:/var/lib/mysql     # persistent data
+      - ./init-sql:/docker-entrypoint-initdb.d  # auto-run initial DDL
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+09:00
+      - --max_connections=200
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost",
+             "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ChromaDB (Vector DB) ─────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: nlp-chromadb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - /data/chromadb:/chroma/chroma  # persistent vector data
+    environment:
+      - ANONYMIZED_TELEMETRY=false
+      - CHROMA_SERVER_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Ollama (LLM Runtime) ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nlp-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - /data/ollama:/root/.ollama    # ★ KEY: persistent model file storage
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=/root/.ollama
+    # Uncomment below to enable GPU (requires NVIDIA Container Toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Spring Boot 4 Application ────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nlp-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      # Platform meta DB
+      SPRING_DATASOURCE_URL:      jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-nlplatform}?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-nlpuser}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
+      # Ollama / ChromaDB
+      APP_OLLAMA_BASE_URL:        http://ollama:11434
+      APP_CHROMADB_BASE_URL:      http://chromadb:8000
+      # AES-GCM encryption key (for DB credentials / Git Token encryption)
+      SECURITY_TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      # File storage paths
+      APP_RESULTS_BASE_DIR: /data/results
+      APP_SYSTEMS_BASE_DIR: /data/systems
+      # JVM
+      JAVA_OPTS: "-Xms512m -Xmx2g -XX:+UseG1GC"
+      TZ: Asia/Seoul
+    volumes:
+      - /data/systems:/data/systems
+      - /data/results:/data/results
+      - /tmp/nl-platform:/tmp/nl-platform
+
+networks:
+  default:
+    name: nlp-network
+```
+
+### 11-4. .env File
+
+```dotenv
+# .env — NEVER commit to git (add to .gitignore)
+
+MYSQL_ROOT_PASSWORD=change_this_root_password
+MYSQL_DATABASE=nlplatform
+MYSQL_USER=nlpuser
+MYSQL_PASSWORD=change_this_db_password
+
+# 32-byte AES key (generate: openssl rand -base64 32)
+TOKEN_ENCRYPTION_KEY=REPLACE_WITH_32_BYTE_BASE64_KEY_HERE
+```
+
+```bash
+chmod 600 .env   # restrict file permissions
+```
+
+### 11-5. Dockerfile
+
+```dockerfile
+FROM eclipse-temurin:21-jdk-alpine AS builder
+WORKDIR /app
+COPY gradlew . && COPY gradle gradle && COPY build.gradle.kts .
+COPY settings.gradle.kts . && COPY src src
+RUN ./gradlew bootJar -x test --no-daemon
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+RUN apk add --no-cache git curl tzdata \
+    && cp /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
+    && echo "Asia/Seoul" > /etc/timezone
+COPY --from=builder /app/build/libs/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+```
+
+### 11-6. Automatic Initial DDL Execution
+
+```
+init-sql/
+├── 01_members.sql
+├── 02_target_systems.sql
+├── 03_system_files.sql
+├── 04_query_results.sql
+├── 05_job_history.sql
+└── 06_member_tokens.sql
+```
+
+MySQL container automatically executes `/docker-entrypoint-initdb.d/*.sql` on first startup.
+
+### 11-7. Quick Command Reference
+
+```bash
+# 1. Create directories (once on first setup)
+sudo mkdir -p /data/{ollama,chromadb,mysql,systems,results} /tmp/nl-platform
+
+# 2. Write .env and set permissions
+vi .env && chmod 600 .env
+
+# 3. Start all services
+docker compose up -d
+
+# 4. Check status
+docker compose ps
+
+# 5. Download models (once after first startup)
+docker compose exec ollama ollama pull deepseek-coder:6.7b
+docker compose exec ollama ollama pull nomic-embed-text
+
+# 6. Verify models
+docker compose exec ollama ollama list
+
+# 7. View logs
+docker compose logs -f app
+docker compose logs -f ollama
+
+# 8. Restart / stop
+docker compose restart app
+docker compose down           # preserve data
+```
+
+### 11-8. Nginx Configuration (SSL + WebSocket)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+    ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # WebSocket (STOMP) — long timeout for LLM response wait
+    location /ws {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+---
+
+## 12. Software Infrastructure Definition
+
+| Software | Role | Runtime | Required |
+|----------|------|---------|:--------:|
+| Spring Boot 4 App | Core business logic | Docker | ✅ |
+| Ollama | LLM inference + embedding API | Docker | ✅ |
+| ChromaDB | Vector DB | Docker | ✅ |
+| MySQL 8.0 | Platform meta DB | Docker | ✅ |
+| Git | Source code clone/pull | Inside App container | ✅ |
+| NVIDIA Driver + CUDA | GPU acceleration | Host OS | GPU conditional |
+| Nginx | Reverse Proxy / SSL | Host OS | Recommended |
+
+---
+
+## 13. EC2 Instance Spec Recommendations
+
+| Scenario | Instance | RAM | GPU | Monthly Cost (Seoul) | Recommended Use |
+|----------|---------|-----|-----|---------------------|----------------|
+| A. Development | `m7i.2xlarge` | 32GB | — | ~$140 | Dev/PoC |
+| B. Minimal production | `g4dn.xlarge` | 16GB | T4 16GB | ~$430 | Small-scale |
+| **C. Production (recommended)** ⭐ | **`g4dn.2xlarge`** | **32GB** | **T4 16GB** | **~$620** | **Production** |
+| D. High performance | `g5.xlarge` | 16GB | A10G 22GB | ~$830 | 13B models |
+
+```
+EBS gp3 250 GB
+
+/                       30 GB  OS + Docker images
+/data/
+  ├── ollama/           50 GB  LLM models (deepseek ~3.8GB + nomic ~274MB + buffer)
+  ├── chromadb/         20 GB  persistent vector DB data
+  ├── mysql/            10 GB  platform meta DB
+  ├── systems/         130 GB  per-system docs/ddl/sourcetree
+  └── results/          10 GB  generated Excel/HTML (2-day TTL)
+```
+
+---
+
+## 14. System Architecture
+
+```
+Client (Browser)  ─── HTTPS/WSS ───▶  Nginx :443 (host OS)
+                                            │
+                               ┌────────────▼──────────────────────────────┐
+                               │  Docker Network: nlp-network               │
+                               │                                            │
+                               │  nlp-app :8080 (Spring Boot 4)            │
+                               │  nlp-mysql :3306  nlp-chromadb :8000       │
+                               │  nlp-ollama :11434                         │
+                               │                                            │
+                               │  /data/ollama   → nlp-ollama (mount)       │
+                               │  /data/chromadb → nlp-chromadb (mount)     │
+                               │  /data/mysql    → nlp-mysql (mount)        │
+                               │  /data/systems  → nlp-app (mount)          │
+                               │  /data/results  → nlp-app (mount)          │
+                               └───────────────────────────────────────────┘
+
+Target system DB:
+  → DynamicDataSourceFactory → runtime JDBC connection
+  → External to Docker network (connects directly to production server DB)
+  → EXPLAIN validation + SELECT execution both on same PROD DB
+```
+
+---
+
+## 15. Technology Stack and Dependencies
+
+```kotlin
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-websocket")
+    implementation("org.springframework.boot:spring-boot-starter-security")
+    implementation("org.springframework.boot:spring-boot-starter-mustache")
+    implementation("org.springframework.boot:spring-boot-starter-webflux")
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    implementation("org.jetbrains.kotlin:kotlin-reflect")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
+    // Platform meta DB driver
+    runtimeOnly("com.mysql:mysql-connector-j")
+    // Target system DB drivers (multi-DBMS)
+    runtimeOnly("org.mariadb.jdbc:mariadb-java-client")
+    runtimeOnly("org.postgresql:postgresql")
+    runtimeOnly("com.oracle.database.jdbc:ojdbc11")
+    runtimeOnly("com.microsoft.sqlserver:mssql-jdbc")
+    implementation("com.zaxxer:HikariCP")
+    // Feature libraries
+    implementation("org.apache.poi:poi-ooxml:5.3.0")
+    implementation("org.eclipse.jgit:org.eclipse.jgit:7.0.0.202409031743-r")
+    implementation("com.github.javaparser:javaparser-core:3.26.1")
+    implementation("org.jooq:jooq:3.19.0")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+}
+```
+
+---
+
+## 16. Prompt Language Strategy
+
+**Prompts are written in English; the rejection response is explicitly instructed in Korean.**
+
+SQL generation specialized models have an overwhelming proportion of English training data, so English prompts produce better SQL quality.
+
+```
+[SYSTEM - English]
+You are an expert SQL generator for the "{system.name}" system.
+Target DBMS: {system.dbType}
+Use ONLY the context below. Generate ONLY a valid SQL SELECT statement.
+If not about data extraction, respond EXACTLY: "데이터 추출 요구 아님"
+
+[CONTEXT — retrieved from knowledge base]
+{3 DDL chunks + 2 source code chunks + 1 Markdown chunk}
+
+[USER REQUEST]
+{user natural language input}
+```
+
+---
+
+## 17. Functional Design Detail
+
+### 17-1. Data Extraction
+
+```
+POST /api/query/extract {systemId, naturalLanguage}
+→ Verify Member authentication
+→ Create QueryResult (status=PROCESSING)
+→ Async coroutine:
+   → [Parallel] SQL generation + dataset naming (2 LLM calls in parallel)
+   → SqlExecutionGuard (static analysis → EXPLAIN validation)
+   → Execute on PROD DB → Apache POI Excel
+   → Save to /data/results/{id}/result.xlsx
+   → Update QueryResult (COMPLETED)
+   → Slack file attachment (if slackEnabled=Y)
+   → WebSocket: {type:BOARD_READY, url:/board/{id}}
+```
+
+### 17-2. Data Visualization
+
+```
+POST /api/query/visualize {systemId, naturalLanguage}
+→ [Stage 1] SQL generation + EXPLAIN + PROD DB execution
+→ [Stage 2] Generate d3.js HTML → /data/results/{id}/visualization.html
+→ Send HTML via WebSocket → iframe rendering
+→ [Download] html2canvas PNG + JSZip
+```
+
+### 17-3. Full Admin API List
+
+```
+Members:     GET/POST /admin/members
+             PUT /admin/members/{id}/role|status
+
+Systems:     GET/POST /admin/systems
+             PUT/DELETE /admin/systems/{id}
+
+Files:       GET/POST   /admin/systems/{id}/files
+             DELETE     /admin/systems/{id}/files/{fid}
+
+Git:         POST /admin/systems/{id}/git/sync
+             GET  /admin/systems/{id}/git/status
+
+Ingestion:   POST /admin/systems/{id}/ingest  {mode:FULL|INCREMENTAL}
+             GET  /admin/systems/{id}/ingest/status
+
+Job History: GET /admin/jobs
+             GET /admin/jobs/{id}  (includes stack_trace)
+
+Board:       GET /board                list
+             GET /board/{id}           detail
+             GET /board/{id}/download  Excel download
+             GET /board/{id}/html      HTML serving (for iframe)
+```
+
+---
+
+## 18. Security Considerations
+
+| Threat | Countermeasure |
+|--------|---------------|
+| SQL Injection | SELECT only + forbidden keywords + EXPLAIN REJECT |
+| DB overload | Block execution when EXPLAIN threshold exceeded + enforce LIMIT |
+| DB credential exposure | AES-GCM encrypted storage, mask in API responses |
+| Git Token exposure | AES-GCM encrypted storage |
+| .env file exposure | Add to .gitignore + chmod 600 |
+| File upload abuse | Only .md/.sql allowed, 10MB limit, Path Traversal blocked |
+| Unauthorized admin access | ADMIN role + Spring Security |
+| Container port exposure | Docker ports → 127.0.0.1 binding (block external) |
+| Brute-force login | 5 failures → set lockedUntil |
+| iframe XSS | sandbox="allow-scripts" only |
+
+---
+
+## 19. Non-Functional Requirements and Limitations
+
+| Item | GPU Instance Baseline |
+|------|:---------------------:|
+| LLM SQL generation | 5~15 sec |
+| EXPLAIN validation | < 500ms |
+| ChromaDB search | < 25ms |
+| Excel generation (10,000 rows) | 1~3 sec |
+| Embedding (1,000 chunks) | ~50 sec |
+| Git clone (large repo) | Several minutes (async) |
+
+**Known Limitations:**  
+Oracle/MSSQL EXPLAIN parsing is significantly more complex than MySQL/PostgreSQL. Incremental addition in Phase 5 is recommended.
+
+---
+
+## 20. Development Roadmap
+
+```
+Phase 1 — Infrastructure + Domain Foundation (3 weeks)
+  ├── Docker Compose environment setup + model download
+  ├── Member entity + Spring Security
+  ├── TargetSystem + SystemFile entities
+  ├── DynamicDataSourceFactory + TokenEncryptor
+  └── SystemDirectoryManager + ChromaDB collection management
+
+Phase 2 — Embedding Pipeline (2 weeks)
+  ├── JobHistory entity + JobHistoryService
+  ├── OllamaClient (embed + generate)
+  ├── ChromaDbClient (upsert + query)
+  ├── MarkdownChunker + SqlDdlChunker + SourceCodeChunker
+  ├── DocumentIngestionPipeline (FULL/INCREMENTAL/SINGLE)
+  └── Git Sync API + automatic embedding trigger
+
+Phase 3 — SQL Validation + Extraction + Board (3 weeks)
+  ├── SqlValidator + ExplainAnalyzer (MySQL/MariaDB/PostgreSQL)
+  ├── LlmOrchestrationService (RAG + SQL generation + naming)
+  ├── NLQueryService async coroutine
+  ├── Apache POI Excel + QueryResult board
+  ├── WebSocket + ResultFileCleanupScheduler (2-day TTL)
+  └── Slack file attachment delivery
+
+Phase 4 — Visualization + Admin UI (2 weeks)
+  ├── VisualizationService (two-stage LLM)
+  ├── HTML serving API + iframe rendering
+  └── Complete admin UI (Mustache)
+
+Phase 5 — Oracle/MSSQL + Stabilization (1 week)
+  ├── ExplainAnalyzer Oracle/MSSQL parser addition
+  ├── Concurrent request Semaphore queuing
+  ├── Nginx + SSL (Certbot)
+  └── Monitoring (Micrometer + CloudWatch)
+```
+
+---
+
+*This document is the v7 final consolidated version and supersedes v6 and `embedding-pipeline-design.md`.*
