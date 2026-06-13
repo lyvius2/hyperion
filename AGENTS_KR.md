@@ -35,6 +35,7 @@
 13. [테스트 규칙](#13-테스트-규칙)
 14. [금지 사항](#14-금지-사항)
 15. [커밋 및 브랜치 규칙](#15-커밋-및-브랜치-규칙)
+16. [프롬프트 관리 규칙](#16-프롬프트-관리-규칙)
 
 ---
 
@@ -89,7 +90,11 @@ RAG는 학습이 아닙니다. 매 요청마다 ChromaDB에서 관련 청크를 
 
 ```
 Controller
-    └─ Service
+    ├─ Facade                            ← 여러 Service 오케스트레이션
+    │    ├─ ServiceA
+    │    ├─ ServiceB
+    │    └─ ServiceC
+    └─ Service (단순 케이스는 직접 호출 허용)
          ├─ LlmOrchestrationService
          ├─ DocumentIngestionPipeline
          ├─ JobHistoryService
@@ -104,6 +109,7 @@ Controller
 | 레이어 | 역할 | 금지 |
 |--------|------|------|
 | **Controller** | HTTP 요청/응답, 파라미터 검증, 인증 확인 | 비즈니스 로직 작성 |
+| **Facade** | 단일 유스케이스를 위한 여러 Service 오케스트레이션, 트랜잭션 경계 관리 | DB 직접 접근, 다른 Facade 호출, infra 클라이언트 직접 호출 |
 | **Service** | 단일 도메인 비즈니스 로직 | 타 Service 직접 호출 |
 | **LlmOrchestrationService** | RAG 검색 + 프롬프트 조립 + LLM 호출 오케스트레이션 | DB 직접 접근 |
 | **DocumentIngestionPipeline** | 임베딩 파이프라인 전체 흐름 조율 | HTTP 요청 처리 |
@@ -114,23 +120,53 @@ Controller
 | **Scheduler** | TTL 만료 파일 삭제 등 정기 작업 | 비즈니스 로직 직접 구현 |
 | **Entity/Domain** | 데이터 구조 정의 | 외부 서비스 호출 |
 
-### Service 간 오케스트레이션은 허용하지 않습니다
+### Facade 패턴 — 여러 Service 오케스트레이션
 
-Service는 다른 Service를 직접 호출할 수 없습니다. 여러 Service의 협력이 필요한 경우,  
-상위 Service 또는 Controller에서 각각 순서대로 호출합니다.
+하나의 유스케이스에서 여러 Service의 협력이 필요한 경우 **Facade** 클래스를 도입합니다.  
+Facade는 여러 Service에 동시에 의존할 수 있는 유일한 레이어입니다.  
+Facade가 존재하더라도 Service → Service 직접 호출은 여전히 금지입니다.
 
 ```kotlin
 // ❌ 금지: Service → Service 직접 호출
 @Service
 class NLQueryService(private val ingestionService: DocumentIngestionPipeline) { ... }
 
-// ✅ 허용: Controller에서 순서대로 호출하거나 상위 Service에서 조율
-@Service
-class NLQueryService(
-    private val llmService: LlmOrchestrationService,  // 인프라 클라이언트 래퍼
-    private val queryExecutor: QueryExecutor
-) { ... }
+// ✅ 허용: Facade가 여러 Service를 오케스트레이션
+@Component
+class NLQueryFacade(
+    private val nlQueryService: NLQueryService,
+    private val jobHistoryService: JobHistoryService,
+    private val webSocketNotifier: WebSocketNotifier
+) {
+    suspend fun processExtract(system: TargetSystem, member: Member, nl: String) {
+        val job = jobHistoryService.start(JobType.QUERY_EXTRACT, system, member, nl.take(200))
+        runCatching {
+            val result = nlQueryService.processExtract(system, member, nl)
+            jobHistoryService.complete(job, "rows=${result.size}")
+            webSocketNotifier.sendResult(member.sessionId, result)
+        }.onFailure { e ->
+            jobHistoryService.fail(job, e)
+            webSocketNotifier.sendError(member.sessionId, e.toErrorCode(), e.toUserMessage())
+        }
+    }
+}
+
+// ✅ 허용: Controller → Service 직접 호출 (Service 하나만 필요한 경우)
+@RestController
+class JobHistoryController(private val jobHistoryService: JobHistoryService) {
+    @GetMapping("/admin/jobs/{id}")
+    fun getJob(@PathVariable id: Long) = jobHistoryService.findById(id)
+}
 ```
+
+### Facade vs. 직접 Service 호출 기준
+
+| 상황 | 패턴 |
+|------|------|
+| Service 하나로 충분한 경우 | `Controller → Service` |
+| 여러 Service의 협력이 필요한 경우 | `Controller → Facade → Service(들)` |
+| 비동기 작업 + WebSocket 알림 + 이력 기록 | 반드시 Facade 사용 |
+| 단순 CRUD 조회 | Controller → Service 직접 호출 허용 |
 
 ---
 
@@ -193,6 +229,14 @@ com.yourcompany.nlplatform
 │       ├── QueryTooExpensiveException.kt
 │       ├── SqlValidationException.kt
 │       └── SystemNotFoundException.kt
+│
+├── facade/                         # Facade 레이어 (여러 Service 오케스트레이션)
+│   ├── query/
+│   │   └── NLQueryFacade.kt        # NLQueryService + JobHistoryService + WebSocketNotifier 조율
+│   ├── ingestion/
+│   │   └── IngestionFacade.kt      # DocumentIngestionPipeline + JobHistoryService 조율
+│   └── admin/
+│       └── SystemAdminFacade.kt    # TargetSystemService + FileUploadService + GitSyncService 조율
 │
 ├── service/                        # Service 레이어
 │   ├── member/
@@ -406,8 +450,10 @@ private fun hasChanged(file: File, storedHash: String?): Boolean { ... }
 ### 허용
 
 ```
-Controller → Service
-Controller → JobHistoryService (상태 조회 목적)
+Controller → Facade
+Controller → Service (Service 하나만 필요한 경우)
+Facade → Service (여러 Service 동시 의존 허용)
+Facade → JobHistoryService
 Service → infra/* (OllamaClient, ChromaDbClient, QueryExecutor 등)
 Service → domain/* (Repository, Entity)
 LlmOrchestrationService → OllamaClient, ChromaDbClient
@@ -418,11 +464,13 @@ Scheduler → Service (단방향)
 ### 금지
 
 ```
-Service → Service (직접 호출 금지)
+Service → Service (직접 호출 금지 — 필요 시 Facade 도입)
+Facade → Facade (Facade 간 교차 호출 금지)
+Service → Facade (역방향 금지)
 infra/* → Service (역방향 금지)
 domain/Entity → Service (역방향 금지)
 Chunker → OllamaClient (청킹과 임베딩은 분리)
-Controller → infra/* (Controller는 Service를 통해서만)
+Controller → infra/* (Controller는 Service 또는 Facade를 통해서만)
 ```
 
 ### 순환 의존성 금지
@@ -1007,6 +1055,125 @@ A. `JobHistory`에 `FAILED` 상태와 스택 트레이스가 저장됩니다. `T
 
 **Q. `nomic-embed-text`와 `gpt-oss:20b`의 역할 차이는 무엇입니까?**  
 A. `nomic-embed-text`는 텍스트를 384차원 벡터로 변환하는 임베딩 전용 모델입니다. SQL을 이해하거나 생성하지 않습니다. `gpt-oss:20b`(초기에는 `deepseek-coder:6.7b` 사용을 검토했으나 성능상 이유로 변경)는 프롬프트 context를 읽고 SQL을 생성하는 언어 모델입니다.
+
+---
+
+---
+
+## 16. 프롬프트 관리 규칙
+
+### 16-1. 클래스 안 String 상수로 관리하면 안 되는 이유
+
+이 프로젝트의 프롬프트는 스키마 컨텍스트, SQL 규칙, 출력 포맷 지시 등 여러 섹션으로 구성된 긴 텍스트입니다.  
+Kotlin 소스 파일 안에 `String` 리터럴이나 `companion object` 상수로 삽입하면 다음 문제가 발생합니다.
+
+- `\n`, `"""`, `$` 등 Kotlin 이스케이프 문법이 섞여 프롬프트 자체를 읽기 어려움
+- 프롬프트를 수정할 때마다 프로젝트를 재컴파일해야 함
+- PR 리뷰 시 들여쓰기·이스케이프 문자와 로직이 뒤섞여 diff가 지저분함
+- 도메인 전문가(프롬프트 튜너) 등 비개발자가 안전하게 편집하기 어려움
+
+### 16-2. 권장 방식 — 리소스 템플릿 파일 + PromptBuilder
+
+프롬프트 **템플릿**을 `src/main/resources/prompts/` 하위에 `.md` 파일로 저장합니다.  
+`PromptBuilder`는 이 템플릿을 시작 시 로드하고, 런타임에 변수를 치환하여 최종 프롬프트를 조립합니다.
+
+```
+src/main/resources/prompts/
+├── sql-generation.md           # SQL 생성 메인 프롬프트
+├── sql-optimization.md         # EXPLAIN WARN 시 재질의 프롬프트
+├── dataset-naming.md           # 데이터셋 이름 생성 프롬프트
+└── visualization-type.md       # 시각화 타입 선택 프롬프트
+```
+
+```kotlin
+// PromptBuilder.kt — 시작 시 템플릿 로드, 호출 시 변수 치환
+@Component
+class PromptBuilder(resourceLoader: ResourceLoader) {
+
+    private val templates: Map<PromptType, String> = PromptType.entries.associateWith { type ->
+        resourceLoader.getResource("classpath:prompts/${type.filename}").inputStream
+            .bufferedReader().readText()
+    }
+
+    fun buildSqlGenerationPrompt(nl: String, schemaContext: String, codeContext: String): String =
+        templates[PromptType.SQL_GENERATION]!!
+            .replace("{{natural_language}}", nl)
+            .replace("{{schema_context}}", schemaContext)
+            .replace("{{code_context}}", codeContext)
+}
+
+enum class PromptType(val filename: String) {
+    SQL_GENERATION("sql-generation.md"),
+    SQL_OPTIMIZATION("sql-optimization.md"),
+    DATASET_NAMING("dataset-naming.md"),
+    VISUALIZATION_TYPE("visualization-type.md")
+}
+```
+
+### 16-3. 템플릿 파일 형식
+
+플레이스홀더 규칙은 `{{변수명}}`을 사용합니다. 가독성을 위해 Markdown 형식으로 작성합니다.
+
+```markdown
+<!-- prompts/sql-generation.md -->
+당신은 {{db_type}} 데이터베이스 전문 SQL 생성 어시스턴트입니다.
+
+## 스키마 컨텍스트
+{{schema_context}}
+
+## 관련 소스 코드
+{{code_context}}
+
+## 작업
+아래 자연어 요청을 단일 SELECT SQL 문으로 변환하십시오.
+- 위 스키마 컨텍스트에 존재하는 테이블과 컬럼만 사용하십시오.
+- 반드시 LIMIT 절을 포함하십시오 (최대 10,000건).
+- 전체 테이블을 스캔하는 서브쿼리는 사용하지 마십시오.
+
+## 요청
+{{natural_language}}
+
+## 출력
+SQL 문만 반환하십시오. 설명이나 마크다운 코드 블록은 포함하지 마십시오.
+```
+
+### 16-4. 규칙
+
+```
+✅ 모든 프롬프트는 src/main/resources/prompts/ 하위 .md 파일로 저장
+✅ PromptBuilder만이 템플릿을 로드하고 조립할 수 있음
+✅ 플레이스홀더는 반드시 {{변수명}} 규칙을 따름
+✅ 각 템플릿 파일은 PromptType enum 항목과 1:1 대응
+✅ PromptBuilder는 단위 테스트 필수 — 플레이스홀더 치환이 정확한지 검증
+
+❌ String 리터럴 또는 companion object 상수로 프롬프트 텍스트 하드코딩
+❌ PromptBuilder 외부에서 resourceLoader로 프롬프트 파일 직접 로드
+❌ 목적이 다른 여러 프롬프트를 단일 템플릿 파일에 혼재
+❌ 조립 완료된 프롬프트에 미치환 {{플레이스홀더}} 잔존
+```
+
+### 16-5. PromptBuilder 테스트
+
+```kotlin
+@ExtendWith(MockitoExtension::class)
+class PromptBuilderTest {
+
+    private val promptBuilder = PromptBuilder(DefaultResourceLoader())
+
+    @Test
+    @DisplayName("SQL 생성 프롬프트는 모든 플레이스홀더를 치환해야 한다")
+    fun `sql generation prompt should substitute all placeholders`() {
+        val prompt = promptBuilder.buildSqlGenerationPrompt(
+            nl = "지역별 총 매출을 보여줘",
+            schemaContext = "CREATE TABLE orders ...",
+            codeContext = "fun getOrdersByRegion() ..."
+        )
+        assertThat(prompt).doesNotContain("{{")   // 미치환 플레이스홀더 없음 확인
+        assertThat(prompt).contains("지역별 총 매출을 보여줘")
+        assertThat(prompt).contains("CREATE TABLE orders")
+    }
+}
+```
 
 ---
 

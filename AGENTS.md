@@ -37,6 +37,7 @@ Always read both documents before writing code. Any implementation that conflict
 13. [Testing Rules](#13-testing-rules)
 14. [Prohibited Practices](#14-prohibited-practices)
 15. [Commit and Branch Rules](#15-commit-and-branch-rules)
+16. [Prompt Management Rules](#16-prompt-management-rules)
 
 ---
 
@@ -91,7 +92,11 @@ This project is composed of the following layers. Each layer's scope of responsi
 
 ```
 Controller
-    └─ Service
+    ├─ Facade                            ← multi-service orchestration
+    │    ├─ ServiceA
+    │    ├─ ServiceB
+    │    └─ ServiceC
+    └─ Service (direct, for simple cases)
          ├─ LlmOrchestrationService
          ├─ DocumentIngestionPipeline
          ├─ JobHistoryService
@@ -106,6 +111,7 @@ Controller
 | Layer | Role | Prohibited |
 |-------|------|-----------|
 | **Controller** | HTTP request/response, parameter validation, auth check | Writing business logic |
+| **Facade** | Orchestrate multiple Services for a single use-case; manage transaction boundary | Direct DB access, calling other Facades, calling infra clients directly |
 | **Service** | Single-domain business logic | Directly calling other Services |
 | **LlmOrchestrationService** | RAG search + prompt assembly + LLM call orchestration | Direct DB access |
 | **DocumentIngestionPipeline** | Orchestrating the full embedding pipeline flow | Handling HTTP requests |
@@ -116,22 +122,53 @@ Controller
 | **Scheduler** | Periodic tasks such as TTL-expired file deletion | Implementing business logic directly |
 | **Entity/Domain** | Defining data structures | Calling external services |
 
-### Inter-Service Orchestration Is Not Permitted
+### Facade Pattern — Multi-Service Orchestration
 
-A Service cannot directly call another Service. When cooperation between multiple Services is required, call each one sequentially from a higher-level Service or Controller.
+When a use-case requires cooperation between multiple Services, introduce a **Facade** class.  
+A Facade is the only layer allowed to depend on multiple Services simultaneously.  
+Direct Service → Service calls remain prohibited even when a Facade exists.
 
 ```kotlin
 // ❌ Prohibited: Service → Service direct call
 @Service
 class NLQueryService(private val ingestionService: DocumentIngestionPipeline) { ... }
 
-// ✅ Allowed: Call sequentially from Controller, or orchestrate from a higher-level Service
-@Service
-class NLQueryService(
-    private val llmService: LlmOrchestrationService,  // infrastructure client wrapper
-    private val queryExecutor: QueryExecutor
-) { ... }
+// ✅ Allowed: Facade orchestrates multiple Services
+@Component
+class NLQueryFacade(
+    private val nlQueryService: NLQueryService,
+    private val jobHistoryService: JobHistoryService,
+    private val webSocketNotifier: WebSocketNotifier
+) {
+    suspend fun processExtract(system: TargetSystem, member: Member, nl: String) {
+        val job = jobHistoryService.start(JobType.QUERY_EXTRACT, system, member, nl.take(200))
+        runCatching {
+            val result = nlQueryService.processExtract(system, member, nl)
+            jobHistoryService.complete(job, "rows=${result.size}")
+            webSocketNotifier.sendResult(member.sessionId, result)
+        }.onFailure { e ->
+            jobHistoryService.fail(job, e)
+            webSocketNotifier.sendError(member.sessionId, e.toErrorCode(), e.toUserMessage())
+        }
+    }
+}
+
+// ✅ Also allowed: Controller → Service directly (when only one Service is needed)
+@RestController
+class JobHistoryController(private val jobHistoryService: JobHistoryService) {
+    @GetMapping("/admin/jobs/{id}")
+    fun getJob(@PathVariable id: Long) = jobHistoryService.findById(id)
+}
 ```
+
+### When to Use Facade vs. Direct Service Call
+
+| Situation | Pattern |
+|-----------|---------|
+| Single Service is sufficient | `Controller → Service` |
+| Multiple Services must cooperate | `Controller → Facade → Service(s)` |
+| Async job + WebSocket notification + history logging | Always use Facade |
+| Simple CRUD query | Direct Controller → Service is acceptable |
 
 ---
 
@@ -194,6 +231,14 @@ com.yourcompany.nlplatform
 │       ├── QueryTooExpensiveException.kt
 │       ├── SqlValidationException.kt
 │       └── SystemNotFoundException.kt
+│
+├── facade/                         # Facade layer (multi-service orchestration)
+│   ├── query/
+│   │   └── NLQueryFacade.kt        # Orchestrates NLQueryService + JobHistoryService + WebSocketNotifier
+│   ├── ingestion/
+│   │   └── IngestionFacade.kt      # Orchestrates DocumentIngestionPipeline + JobHistoryService
+│   └── admin/
+│       └── SystemAdminFacade.kt    # Orchestrates TargetSystemService + FileUploadService + GitSyncService
 │
 ├── service/                        # Service layer
 │   ├── member/
@@ -407,8 +452,10 @@ private fun hasChanged(file: File, storedHash: String?): Boolean { ... }
 ### Allowed
 
 ```
-Controller → Service
-Controller → JobHistoryService (for status query purposes)
+Controller → Facade
+Controller → Service (when a single Service is sufficient)
+Facade → Service (multiple Services allowed)
+Facade → JobHistoryService
 Service → infra/* (OllamaClient, ChromaDbClient, QueryExecutor, etc.)
 Service → domain/* (Repository, Entity)
 LlmOrchestrationService → OllamaClient, ChromaDbClient
@@ -419,11 +466,13 @@ Scheduler → Service (one-directional)
 ### Prohibited
 
 ```
-Service → Service (direct calls prohibited)
+Service → Service (direct calls prohibited — use Facade instead)
+Facade → Facade (cross-facade calls prohibited)
+Service → Facade (reverse direction prohibited)
 infra/* → Service (reverse direction prohibited)
 domain/Entity → Service (reverse direction prohibited)
 Chunker → OllamaClient (chunking and embedding are separated)
-Controller → infra/* (Controller must go through Service only)
+Controller → infra/* (Controller must go through Service or Facade)
 ```
 
 ### Circular Dependencies Prohibited
@@ -1008,6 +1057,126 @@ A. The `JobHistory` record is updated to `FAILED` status with the full stack tra
 
 **Q. What is the difference in roles between `nomic-embed-text` and `gpt-oss:20b`?**  
 A. `nomic-embed-text` is an embedding-only model that converts text into 384-dimensional vectors. It does not understand or generate SQL. `gpt-oss:20b` (formerly considered: `deepseek-coder:6.7b`) is a language model that reads the prompt context and generates SQL.
+
+---
+
+---
+
+## 16. Prompt Management Rules
+
+### 16-1. Why Not String Constants in a Class?
+
+Prompts in this project are long, multi-section texts that include schema context, SQL rules,
+and output format instructions. Embedding them as `String` literals or `companion object` constants
+inside Kotlin source files causes the following problems:
+
+- Prompts are not readable without understanding Kotlin string escaping (`\n`, `"""`, `$`)
+- Editing a prompt requires recompiling the project
+- Diff reviews in PRs are noisy with indentation and escape characters mixed with logic
+- Non-developer team members (e.g., domain experts tuning prompts) cannot edit safely
+
+### 16-2. Recommended Approach — Resource Template Files + PromptBuilder
+
+Store prompt **templates** as `.md` files under `src/main/resources/prompts/`.  
+`PromptBuilder` loads these templates at startup and performs runtime variable substitution.
+
+```
+src/main/resources/prompts/
+├── sql-generation.md           # Main SQL generation prompt
+├── sql-optimization.md         # Prompt for re-querying when EXPLAIN returns WARN
+├── dataset-naming.md           # Prompt for generating a dataset name
+└── visualization-type.md       # Prompt for selecting visualization type
+```
+
+```kotlin
+// PromptBuilder.kt — load templates at startup, substitute at call time
+@Component
+class PromptBuilder(resourceLoader: ResourceLoader) {
+
+    private val templates: Map<PromptType, String> = PromptType.entries.associateWith { type ->
+        resourceLoader.getResource("classpath:prompts/${type.filename}").inputStream
+            .bufferedReader().readText()
+    }
+
+    fun buildSqlGenerationPrompt(nl: String, schemaContext: String, codeContext: String): String =
+        templates[PromptType.SQL_GENERATION]!!
+            .replace("{{natural_language}}", nl)
+            .replace("{{schema_context}}", schemaContext)
+            .replace("{{code_context}}", codeContext)
+}
+
+enum class PromptType(val filename: String) {
+    SQL_GENERATION("sql-generation.md"),
+    SQL_OPTIMIZATION("sql-optimization.md"),
+    DATASET_NAMING("dataset-naming.md"),
+    VISUALIZATION_TYPE("visualization-type.md")
+}
+```
+
+### 16-3. Template File Format
+
+Use `{{variable_name}}` as the placeholder convention. Write templates in Markdown for readability.
+
+```markdown
+<!-- prompts/sql-generation.md -->
+You are a SQL generation assistant for a {{db_type}} database.
+
+## Schema Context
+{{schema_context}}
+
+## Related Source Code
+{{code_context}}
+
+## Task
+Convert the following natural language request into a single SELECT SQL statement.
+- Use only the tables and columns present in the schema context above.
+- Always include a LIMIT clause (maximum 10,000 rows).
+- Do not use subqueries that scan the full table.
+
+## Request
+{{natural_language}}
+
+## Output
+Return only the SQL statement with no explanation or markdown fences.
+```
+
+### 16-4. Rules
+
+```
+✅ All prompts must be stored as .md files under src/main/resources/prompts/
+✅ PromptBuilder is the only class that may load and assemble prompts
+✅ Placeholders must use the {{variable_name}} convention
+✅ Each prompt file must correspond to exactly one PromptType enum entry
+✅ PromptBuilder requires unit tests — test that placeholders are substituted correctly
+
+❌ Hardcoding prompt text as a String literal or companion object constant
+❌ Calling resourceLoader or reading prompt files from outside PromptBuilder
+❌ Sharing a single template file for multiple distinct prompt purposes
+❌ Leaving unused {{placeholder}} variables in the final assembled prompt
+```
+
+### 16-5. Testing PromptBuilder
+
+```kotlin
+@ExtendWith(MockitoExtension::class)
+class PromptBuilderTest {
+
+    private val promptBuilder = PromptBuilder(DefaultResourceLoader())
+
+    @Test
+    @DisplayName("SQL generation prompt should substitute all placeholders")
+    fun `sql generation prompt should substitute all placeholders`() {
+        val prompt = promptBuilder.buildSqlGenerationPrompt(
+            nl = "Show me total sales by region",
+            schemaContext = "CREATE TABLE orders ...",
+            codeContext = "fun getOrdersByRegion() ..."
+        )
+        assertThat(prompt).doesNotContain("{{")   // No unresolved placeholders
+        assertThat(prompt).contains("Show me total sales by region")
+        assertThat(prompt).contains("CREATE TABLE orders")
+    }
+}
+```
 
 ---
 
