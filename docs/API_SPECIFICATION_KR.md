@@ -231,8 +231,7 @@ GET /auth/me
     "displayName": "황윤선",
     "role": "ADMIN",
     "status": "ACTIVE",
-    "lastLoginAt": "2026-06-12T09:00:00+09:00",
-    "emailVerified": "Y"
+    "lastLoginAt": "2026-06-12T09:00:00+09:00"
   }
 }
 ```

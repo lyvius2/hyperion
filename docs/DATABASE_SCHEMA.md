@@ -91,7 +91,7 @@
 | `members` → `query_results` | 1:N | A member submits multiple queries (`requested_by`) |
 | `members` → `system_files` | 1:N | A member uploads multiple files (`uploaded_by`) |
 | `members` → `job_history` | 1:N | A member triggers multiple jobs (`triggered_by`, nullable) |
-| `members` → `member_tokens` | 1:N | A member holds multiple one-time tokens (email verify / password reset only) |
+| `members` → `member_tokens` | 1:N | A member holds multiple one-time tokens (password reset only — email verification not implemented) |
 | `target_systems` → `system_files` | 1:N | A system has multiple registered files |
 | `target_systems` → `query_results` | 1:N | A system has multiple query results |
 | `target_systems` → `job_history` | 1:N | A system has multiple job history records (nullable: SET NULL on DELETE) |
@@ -129,13 +129,14 @@
 
 > **Authentication sessions are NOT stored here.**  
 > HTTP session-based authentication uses **Redis** (via Spring Session Data Redis), not this table.  
-> This table stores one-time tokens for email verification and password reset only.
+> This table stores one-time tokens for **password reset only**.  
+> Email verification is not implemented.
 
 | Column | Type | NULL | Default | Description |
 |--------|------|:----:|---------|-------------|
 | `id` | BIGINT | NO | AUTO_INCREMENT | Primary key |
 | `member_id` | BIGINT | NO | — | FK → members(id) |
-| `token_type` | VARCHAR(30) | NO | — | `EMAIL_VERIFY` \| `PASSWORD_RESET` |
+| `token_type` | VARCHAR(30) | NO | — | `PASSWORD_RESET` |
 | `token_hash` | VARCHAR(255) | NO | — | SHA-256 hash (original token not stored) |
 | `expires_at` | DATETIME | NO | — | Expiration time |
 | `used_at` | DATETIME | YES | NULL | Usage time (NULL = not yet used) |
@@ -378,7 +379,7 @@ init-sql/
 | `db_username_enc` | AES-256-GCM encryption (two-way) | Must be decryptable at runtime |
 | `db_password_enc` | AES-256-GCM encryption (two-way) | Must be decryptable at runtime |
 | `git_access_token_enc` | AES-256-GCM encryption (two-way) | Must be decryptable at runtime |
-| `token_hash` | SHA-256 hash (one-way) | Original email/password-reset tokens never stored |
+| `token_hash` | SHA-256 hash (one-way) | Original password-reset tokens never stored |
 | `slack_webhook_url` | Plain text | Slack Webhooks are unguessable random URLs |
 
 > **Authentication session data is not stored in MySQL.**  
@@ -392,7 +393,7 @@ init-sql/
 | Table | Deletion Policy | Retention |
 |-------|----------------|-----------|
 | `members` | Physical delete on withdrawal OR soft delete with `status=WITHDRAWN` | — |
-| `member_tokens` | Physical delete by scheduler after expiration | `EMAIL_VERIFY`: 24 hours / `PASSWORD_RESET`: 1 hour |
+| `member_tokens` | Physical delete by scheduler after expiration | `PASSWORD_RESET`: 1 hour |
 | `target_systems` | Physical delete | — |
 | `system_files` | Physical delete (cascades on system deletion) | — |
 | `query_results` | **DB record never deleted** / soft delete with `unused=Y` | Permanent |

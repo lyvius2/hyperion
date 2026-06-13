@@ -107,8 +107,8 @@ status                     db_username_enc (AES-GCM)   source_hash
 failed_login_count         db_password_enc (AES-GCM)   last_embedded_at
 locked_until               git_url                     embedded_chunk_count
 last_login_at              git_access_token_enc         uploaded_by FK
-email_verified             slack_webhook_url            uploaded_at
-created_at / updated_at    slack_enabled
+created_at / updated_at    slack_webhook_url            uploaded_at
+                           slack_enabled
                            ingestion_status
                            last_ingested_at
                            total_chunk_count
@@ -153,10 +153,6 @@ CREATE TABLE members (
     password_changed_at DATETIME     NULL,
     last_login_at       DATETIME     NULL,
     last_login_ip       VARCHAR(45)  NULL,
-    email_verified      CHAR(1)      NOT NULL DEFAULT 'N',
-    email_verified_at   DATETIME     NULL,
-    oauth_provider      VARCHAR(20)  NULL     COMMENT 'google|kakao|github',
-    oauth_provider_id   VARCHAR(200) NULL,
     created_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT pk_members          PRIMARY KEY (id),
@@ -167,14 +163,14 @@ CREATE TABLE members (
 CREATE TABLE member_tokens (
     id         BIGINT       NOT NULL AUTO_INCREMENT,
     member_id  BIGINT       NOT NULL,
-    token_type VARCHAR(30)  NOT NULL  COMMENT 'EMAIL_VERIFY|PASSWORD_RESET',
+    token_type VARCHAR(30)  NOT NULL  COMMENT 'PASSWORD_RESET',
     token_hash VARCHAR(255) NOT NULL  COMMENT 'SHA-256 해시 (원본 미저장)',
     expires_at DATETIME     NOT NULL,
     used_at    DATETIME     NULL,
     created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT pk_member_tokens PRIMARY KEY (id),
     CONSTRAINT fk_member_tokens_member FOREIGN KEY (member_id) REFERENCES members(id)
-) COMMENT = '회원 토큰 (이메일 인증, 비밀번호 재설정 전용 — 인증은 Session 사용)';
+) COMMENT = '회원 토큰 (비밀번호 재설정 전용 — 인증은 Session 사용, 이메일 인증 미구현)';
 ```
 
 ### 4-2. 인증 설계 — Session + Redis

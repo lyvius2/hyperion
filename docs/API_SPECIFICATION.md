@@ -233,8 +233,7 @@ GET /auth/me
     "displayName": "Sherlock Holmes",
     "role": "ADMIN",
     "status": "ACTIVE",
-    "lastLoginAt": "2026-06-12T09:00:00+09:00",
-    "emailVerified": "Y"
+    "lastLoginAt": "2026-06-12T09:00:00+09:00"
   }
 }
 ```
