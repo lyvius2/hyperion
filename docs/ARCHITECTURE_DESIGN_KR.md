@@ -38,7 +38,7 @@
 
 | # | 요건 | 판정 | 비고 |
 |---|------|:----:|------|
-| 2 | SQL/코딩 특화 LLM 모델 | ✅ | `deepseek-coder:6.7b` 권장 |
+| 2 | SQL/코딩 특화 LLM 모델 | ✅ | `gpt-oss:20b` 사용 (초기에는 `deepseek-coder:6.7b` 검토) |
 | 3 | Markdown + SQL DDL + 소스 코드 RAG | ✅ | 타입별 전용 청킹 + 임베딩 파이프라인 |
 | 4~7 | 자연어 → SQL → Excel, 비동기 + WebSocket | ✅ | Spring WebSocket + Kotlin Coroutine |
 | 8~10 | 자연어 → SQL → d3.js HTML → ZIP | ✅ | 2단계 LLM 호출 |
@@ -61,7 +61,7 @@
 
 문서/DDL/코드 → 청킹 → nomic-embed-text → 벡터 → ChromaDB 저장
 
-  · deepseek-coder는 이 단계에 전혀 관여하지 않음
+  · gpt-oss:20b는 이 단계에 전혀 관여하지 않음
   · 문서를 "암기"하는 것이 아님. 텍스트를 수치 좌표로 변환해 저장하는 것
   · 문서 변경 시 재임베딩만으로 즉시 반영 (재학습 불필요)
 
@@ -69,9 +69,9 @@
 
 질문 → nomic-embed-text → 벡터 → ChromaDB 유사도 검색
      → 관련 청크 5~6개 꺼냄 → 프롬프트에 삽입
-     → deepseek-coder 호출 → SQL 생성
+     → gpt-oss:20b 호출 → SQL 생성
 
-  · deepseek-coder는 매 요청마다 context를 처음 읽고 SQL 생성
+  · gpt-oss:20b는 매 요청마다 context를 처음 읽고 SQL 생성
   · 시스템별 ChromaDB 컬렉션 격리 → 타 시스템 데이터 오염 없음
 ```
 
@@ -418,7 +418,7 @@ LLM 생성 SQL
 | 모델 | 단계 | 역할 |
 |------|------|------|
 | `nomic-embed-text` | 사전 임베딩 + 런타임 질문 변환 | 텍스트 → 384차원 벡터만 담당 |
-| `deepseek-coder:6.7b` | 런타임 SQL/HTML 생성 | 프롬프트 context를 읽고 그 자리에서 SQL 생성 |
+| `gpt-oss:20b` | 런타임 SQL/HTML 생성 | 프롬프트 context를 읽고 그 자리에서 SQL 생성 (초기에는 `deepseek-coder:6.7b` 검토) |
 
 ### 9-2. 전체 파이프라인 흐름
 
@@ -585,7 +585,7 @@ class OllamaClient(@Value("\${app.ollama.base-url}") private val baseUrl: String
     suspend fun generate(prompt: String, temperature: Double = 0.1): String {
         val res = webClient.post().uri("$baseUrl/api/generate")
             .bodyValue(mapOf(
-                "model"   to "deepseek-coder:6.7b",
+                "model"   to "gpt-oss:20b",  // deepseek-coder:6.7b에서 변경
                 "prompt"  to prompt,
                 "stream"  to false,
                 "options" to mapOf("temperature" to temperature, "num_predict" to 1024)
@@ -769,7 +769,7 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
     val context = chunks.sortedByDescending { it.similarity }
                         .joinToString("\n\n---\n\n") { it.text }
 
-    // ④ 영문 프롬프트 + deepseek-coder 호출
+    // ④ 영문 프롬프트 + gpt-oss:20b 호출
     return ollamaClient.generate("""
         [SYSTEM]
         You are an expert SQL generator for the "${system.name}" system.
@@ -800,10 +800,10 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 └── models/
     ├── manifests/
     │   └── registry.ollama.ai/library/
-    │       ├── deepseek-coder/   ← 모델 메타 정보
+    │       ├── gpt-oss/          ← 모델 메타 정보 (deepseek-coder에서 변경)
     │       └── nomic-embed-text/
     └── blobs/                    ← 실제 가중치 파일
-        ├── sha256-xxxx...        ← deepseek-coder:6.7b (~3.8GB)
+        ├── sha256-xxxx...        ← gpt-oss:20b (~11GB)
         └── sha256-yyyy...        ← nomic-embed-text (~274MB)
 ```
 
@@ -811,7 +811,7 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 
 ```bash
 # Ollama 컨테이너에서 실행
-docker compose exec ollama ollama pull deepseek-coder:6.7b   # ~3.8GB, 10~20분
+docker compose exec ollama ollama pull gpt-oss:20b           # ~11GB, 30~60분 (deepseek-coder:6.7b에서 변경)
 docker compose exec ollama ollama pull nomic-embed-text       # ~274MB, 1~2분
 
 # 확인
@@ -1015,7 +1015,7 @@ docker compose up -d
 docker compose ps
 
 # 5. 모델 다운로드 (최초 1회, 기동 후 실행)
-docker compose exec ollama ollama pull deepseek-coder:6.7b
+docker compose exec ollama ollama pull gpt-oss:20b
 docker compose exec ollama ollama pull nomic-embed-text
 
 # 6. 모델 확인

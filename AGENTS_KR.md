@@ -47,7 +47,7 @@
 ```
 사용자 자연어 입력
     → RAG(ChromaDB 유사도 검색)로 관련 스키마/코드 청크 추출
-    → LLM(deepseek-coder) 프롬프트에 context 삽입
+    → LLM(gpt-oss:20b) 프롬프트에 context 삽입
     → SQL 생성
     → EXPLAIN 비용 검증 (PROD DB, 데이터 읽기 없음)
     → PROD DB 실행
@@ -348,7 +348,40 @@ log.info("DB 접속 비밀번호: ${system.dbPasswordEnc}")
 log.info("Git Token: ${system.gitAccessTokenEnc}")
 ```
 
-### 5-7. 한국어 주석 원칙
+### 5-7. LLM 모델명 설정 관리
+
+LLM 모델명은 소스 코드에 하드코딩하지 않습니다. 반드시 `application.yaml`에서 관리하고 `@ConfigurationProperties`를 통해 주입합니다.
+
+```kotlin
+// ✅ 권장: application.yaml에서 모델명 주입
+@ConfigurationProperties(prefix = "app.ollama")
+data class OllamaProperties(
+    val baseUrl: String,
+    val embeddingModel: String = "nomic-embed-text",
+    val generationModel: String = "gpt-oss:20b"   // 초기에는 deepseek-coder:6.7b 검토
+)
+
+// OllamaClient에서 사용
+suspend fun generate(prompt: String): String {
+    val res = webClient.post().uri("$baseUrl/api/generate")
+        .bodyValue(mapOf("model" to ollamaProperties.generationModel, ...))
+        ...
+}
+
+// ❌ 금지: 모델명 하드코딩
+.bodyValue(mapOf("model" to "gpt-oss:20b", ...))
+```
+
+```yaml
+# application.yaml
+app:
+  ollama:
+    base-url: http://localhost:11434
+    embedding-model: nomic-embed-text
+    generation-model: gpt-oss:20b
+```
+
+### 5-8. 한국어 주석 원칙
 
 ```kotlin
 // ✅ 권장: 한국어로 설계 의도 설명
@@ -727,6 +760,32 @@ chromaDbClient.query(collection = system.chromaCollection, ...)
 chromaDbClient.query(collection = "business-context", ...)
 ```
 
+### 11-6. nomic-embed-text — 태스크 prefix 필수 적용
+
+`nomic-embed-text` 모델로 Ollama 임베딩 API를 호출할 때는 반드시 태스크에 맞는 prefix를 텍스트 앞에 붙여야 합니다.
+
+| 상황 | Prefix | 설명 |
+|------|--------|------|
+| 문서 청크 저장 시 | `search_document:` | 인제스천 시 청크를 임베딩할 때 적용 |
+| 쿼리 검색 시 | `search_query:` | RAG 검색을 위해 자연어 쿼리를 임베딩할 때 적용 |
+
+```kotlin
+// ✅ 필수: 임베딩 전 태스크 prefix 추가
+
+// 문서 청크 인제스천 시 (DocumentIngestionPipeline)
+val embeddingInputs = chunks.map { "search_document: ${it.text}" }
+val embeddings = ollamaClient.embedBatch(embeddingInputs)
+
+// RAG 검색 쿼리 임베딩 시 (LlmOrchestrationService)
+val queryEmbedding = ollamaClient.embed("search_query: $naturalLanguage")
+
+// ❌ 금지: prefix 없이 원문 그대로 전송
+val embeddings = ollamaClient.embedBatch(chunks.map { it.text })
+val queryEmbedding = ollamaClient.embed(naturalLanguage)
+```
+
+> **이유:** `nomic-embed-text`는 문서와 쿼리에 따라 내부 표현을 다르게 생성합니다. prefix를 생략하면 검색 정확도가 크게 저하됩니다.
+
 ---
 
 ## 12. SQL 검증 규칙
@@ -876,6 +935,7 @@ class MemberRepositoryTest { ... }
 ❌ 블로킹 I/O (RestTemplate, Thread.sleep 등)
 ❌ println, System.out.println 사용
 ❌ 임베딩 모델(nomic-embed-text)로 SQL 생성 시도
+❌ LLM 모델명을 소스 코드에 하드코딩 (반드시 application.yaml에서 관리)
 ```
 
 ### 강력 권고 금지 (리뷰에서 지적 대상)
@@ -945,8 +1005,8 @@ A. `DbType` enum에 새 항목을 추가하고, `ExplainAnalyzer`에 해당 DBMS
 **Q. 임베딩 파이프라인이 실패하면 어떻게 됩니까?**  
 A. `JobHistory`에 `FAILED` 상태와 스택 트레이스가 저장됩니다. `TargetSystem.ingestionStatus`가 `FAILED`로 업데이트됩니다. 관리자 API `GET /admin/jobs/{id}`로 원인을 확인할 수 있습니다.
 
-**Q. `nomic-embed-text`와 `deepseek-coder`의 역할 차이는 무엇입니까?**  
-A. `nomic-embed-text`는 텍스트를 384차원 벡터로 변환하는 임베딩 전용 모델입니다. SQL을 이해하거나 생성하지 않습니다. `deepseek-coder`는 프롬프트 context를 읽고 SQL을 생성하는 언어 모델입니다.
+**Q. `nomic-embed-text`와 `gpt-oss:20b`의 역할 차이는 무엇입니까?**  
+A. `nomic-embed-text`는 텍스트를 384차원 벡터로 변환하는 임베딩 전용 모델입니다. SQL을 이해하거나 생성하지 않습니다. `gpt-oss:20b`(초기에는 `deepseek-coder:6.7b` 사용을 검토했으나 성능상 이유로 변경)는 프롬프트 context를 읽고 SQL을 생성하는 언어 모델입니다.
 
 ---
 

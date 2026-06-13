@@ -49,7 +49,7 @@ Core flow:
 ```
 User natural language input
     → Extract relevant schema/code chunks via RAG (ChromaDB similarity search)
-    → Insert context into LLM (deepseek-coder) prompt
+    → Insert context into LLM (gpt-oss:20b) prompt
     → Generate SQL
     → EXPLAIN cost validation (PROD DB, no data reads)
     → Execute on PROD DB
@@ -349,7 +349,40 @@ log.info("DB password: ${system.dbPasswordEnc}")
 log.info("Git Token: ${system.gitAccessTokenEnc}")
 ```
 
-### 5-7. Comment Principles
+### 5-7. LLM Model Name Configuration
+
+LLM model names must never be hardcoded in source code. They must be managed via `application.yaml` and injected through `@ConfigurationProperties`.
+
+```kotlin
+// ✅ Recommended: Inject model names from application.yaml
+@ConfigurationProperties(prefix = "app.ollama")
+data class OllamaProperties(
+    val baseUrl: String,
+    val embeddingModel: String = "nomic-embed-text",
+    val generationModel: String = "gpt-oss:20b"   // initially considered: deepseek-coder:6.7b
+)
+
+// Usage in OllamaClient
+suspend fun generate(prompt: String): String {
+    val res = webClient.post().uri("$baseUrl/api/generate")
+        .bodyValue(mapOf("model" to ollamaProperties.generationModel, ...))
+        ...
+}
+
+// ❌ Prohibited: Hardcoded model name
+.bodyValue(mapOf("model" to "gpt-oss:20b", ...))
+```
+
+```yaml
+# application.yaml
+app:
+  ollama:
+    base-url: http://localhost:11434
+    embedding-model: nomic-embed-text
+    generation-model: gpt-oss:20b
+```
+
+### 5-8. Comment Principles
 
 ```kotlin
 // ✅ Recommended: Explain design intent in comments
@@ -728,6 +761,32 @@ chromaDbClient.query(collection = system.chromaCollection, ...)
 chromaDbClient.query(collection = "business-context", ...)
 ```
 
+### 11-6. nomic-embed-text — Task Prefix Is Required
+
+When calling the Ollama embedding API with `nomic-embed-text`, a task-specific prefix **must** be prepended to the prompt text.
+
+| Context | Prefix | Description |
+|---------|--------|-------------|
+| Storing a document chunk | `search_document:` | Applied when embedding chunks during ingestion |
+| Searching with a query | `search_query:` | Applied when embedding the user's natural language query for RAG retrieval |
+
+```kotlin
+// ✅ Required: Prepend task prefix before embedding
+
+// When ingesting document chunks (DocumentIngestionPipeline)
+val embeddingInputs = chunks.map { "search_document: ${it.text}" }
+val embeddings = ollamaClient.embedBatch(embeddingInputs)
+
+// When querying via RAG (LlmOrchestrationService)
+val queryEmbedding = ollamaClient.embed("search_query: $naturalLanguage")
+
+// ❌ Prohibited: Sending raw text without prefix
+val embeddings = ollamaClient.embedBatch(chunks.map { it.text })
+val queryEmbedding = ollamaClient.embed(naturalLanguage)
+```
+
+> **Why:** `nomic-embed-text` uses different internal representations depending on whether the text is a document or a query. Omitting the prefix degrades retrieval accuracy.
+
 ---
 
 ## 12. SQL Validation Rules
@@ -877,6 +936,7 @@ The following are not permitted under any circumstances.
 ❌ Blocking I/O (RestTemplate, Thread.sleep, etc.)
 ❌ Using println or System.out.println
 ❌ Attempting SQL generation with the embedding model (nomic-embed-text)
+❌ Hardcoding LLM model names in source code (must be managed via application.yaml)
 ```
 
 ### Strongly Discouraged (Flagged in Code Review)
@@ -946,8 +1006,8 @@ A. Add a new entry to the `DbType` enum, implement an EXPLAIN parser for that DB
 **Q. What happens if the embedding pipeline fails?**  
 A. The `JobHistory` record is updated to `FAILED` status with the full stack trace saved. `TargetSystem.ingestionStatus` is updated to `FAILED`. The cause can be inspected via the admin API `GET /admin/jobs/{id}`.
 
-**Q. What is the difference in roles between `nomic-embed-text` and `deepseek-coder`?**  
-A. `nomic-embed-text` is an embedding-only model that converts text into 384-dimensional vectors. It does not understand or generate SQL. `deepseek-coder` is a language model that reads the prompt context and generates SQL.
+**Q. What is the difference in roles between `nomic-embed-text` and `gpt-oss:20b`?**  
+A. `nomic-embed-text` is an embedding-only model that converts text into 384-dimensional vectors. It does not understand or generate SQL. `gpt-oss:20b` (formerly considered: `deepseek-coder:6.7b`) is a language model that reads the prompt context and generates SQL.
 
 ---
 

@@ -40,7 +40,7 @@
 
 | # | Requirement | Status | Notes |
 |---|-------------|:------:|-------|
-| 2 | SQL/coding-specialized LLM model | ✅ | `deepseek-coder:6.7b` recommended |
+| 2 | SQL/coding-specialized LLM model | ✅ | `gpt-oss:20b` in use (initially considered: `deepseek-coder:6.7b`) |
 | 3 | Markdown + SQL DDL + source code RAG | ✅ | Dedicated chunking per type + embedding pipeline |
 | 4~7 | Natural language → SQL → Excel, async + WebSocket | ✅ | Spring WebSocket + Kotlin Coroutine |
 | 8~10 | Natural language → SQL → d3.js HTML → ZIP | ✅ | Two-stage LLM call |
@@ -63,7 +63,7 @@
 
 Documents/DDL/Code → Chunking → nomic-embed-text → Vectors → ChromaDB storage
 
-  · deepseek-coder is not involved in this stage at all
+  · gpt-oss:20b is not involved in this stage at all
   · This is NOT "memorizing" documents. It converts text into numerical coordinates
   · When documents change, only re-embedding is needed — no retraining required
 
@@ -71,9 +71,9 @@ Documents/DDL/Code → Chunking → nomic-embed-text → Vectors → ChromaDB st
 
 Question → nomic-embed-text → Vector → ChromaDB similarity search
          → Retrieve 5~6 relevant chunks → Insert into prompt
-         → Call deepseek-coder → Generate SQL
+         → Call gpt-oss:20b → Generate SQL
 
-  · deepseek-coder reads the context fresh on every request and generates SQL
+  · gpt-oss:20b reads the context fresh on every request and generates SQL
   · Per-system ChromaDB collection isolation → No cross-system data contamination
 ```
 
@@ -420,7 +420,7 @@ LLM-generated SQL
 | Model | Stage | Role |
 |-------|-------|------|
 | `nomic-embed-text` | Pre-embedding + runtime query conversion | Converts text → 384-dimension vectors only |
-| `deepseek-coder:6.7b` | Runtime SQL/HTML generation | Reads prompt context and generates SQL on the spot |
+| `gpt-oss:20b` | Runtime SQL/HTML generation | Reads prompt context and generates SQL on the spot (initially considered: `deepseek-coder:6.7b`) |
 
 ### 9-2. Full Pipeline Flow
 
@@ -587,7 +587,7 @@ class OllamaClient(@Value("\${app.ollama.base-url}") private val baseUrl: String
     suspend fun generate(prompt: String, temperature: Double = 0.1): String {
         val res = webClient.post().uri("$baseUrl/api/generate")
             .bodyValue(mapOf(
-                "model"   to "deepseek-coder:6.7b",
+                "model"   to "gpt-oss:20b",  // changed from deepseek-coder:6.7b
                 "prompt"  to prompt,
                 "stream"  to false,
                 "options" to mapOf("temperature" to temperature, "num_predict" to 1024)
@@ -771,7 +771,7 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
     val context = chunks.sortedByDescending { it.similarity }
                         .joinToString("\n\n---\n\n") { it.text }
 
-    // ④ English prompt + call deepseek-coder
+    // ④ English prompt + call gpt-oss:20b
     return ollamaClient.generate("""
         [SYSTEM]
         You are an expert SQL generator for the "${system.name}" system.
@@ -802,10 +802,10 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 └── models/
     ├── manifests/
     │   └── registry.ollama.ai/library/
-    │       ├── deepseek-coder/   ← model metadata
+    │       ├── gpt-oss/          ← model metadata (changed from deepseek-coder)
     │       └── nomic-embed-text/
     └── blobs/                    ← actual weight files
-        ├── sha256-xxxx...        ← deepseek-coder:6.7b (~3.8GB)
+        ├── sha256-xxxx...        ← gpt-oss:20b (~11GB)
         └── sha256-yyyy...        ← nomic-embed-text (~274MB)
 ```
 
@@ -813,7 +813,7 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 
 ```bash
 # Run inside the Ollama container
-docker compose exec ollama ollama pull deepseek-coder:6.7b   # ~3.8GB, 10~20 min
+docker compose exec ollama ollama pull gpt-oss:20b   # ~11GB, 30~60 min (changed from deepseek-coder:6.7b)
 docker compose exec ollama ollama pull nomic-embed-text       # ~274MB, 1~2 min
 
 # Verify
@@ -1017,7 +1017,7 @@ docker compose up -d
 docker compose ps
 
 # 5. Download models (once after first startup)
-docker compose exec ollama ollama pull deepseek-coder:6.7b
+docker compose exec ollama ollama pull gpt-oss:20b
 docker compose exec ollama ollama pull nomic-embed-text
 
 # 6. Verify models
