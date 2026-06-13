@@ -987,7 +987,7 @@ services:
     container_name: nlp-app
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:5542:5542"
     depends_on:
       mysql:
         condition: service_healthy
@@ -1064,7 +1064,7 @@ RUN apk add --no-cache git curl tzdata \
     && cp /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && echo "Asia/Seoul" > /etc/timezone
 COPY --from=builder /app/build/libs/*.jar app.jar
-EXPOSE 8080
+EXPOSE 5542
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
 ```
 
@@ -1123,7 +1123,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:5542;
         proxy_set_header Host              $host;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -1131,7 +1131,7 @@ server {
 
     # WebSocket (STOMP) — LLM 응답 대기 시간 고려
     location /ws {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:5542;
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -1189,7 +1189,7 @@ Client (Browser)  ─── HTTPS/WSS ───▶  Nginx :443 (호스트)
                                ┌────────────▼──────────────────────────────┐
                                │  Docker Network: nlp-network               │
                                │                                            │
-                               │  nlp-app :8080 (Spring Boot 4)            │
+                               │  nlp-app :5542 (Spring Boot 4)            │
                                │  nlp-mysql :3306  nlp-chromadb :8000       │
                                │  nlp-ollama :11434  nlp-redis :6379        │
                                │                                            │
