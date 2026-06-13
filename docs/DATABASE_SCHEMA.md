@@ -111,16 +111,11 @@
 | `display_name` | VARCHAR(100) | NO | — | Display name |
 | `role` | VARCHAR(20) | NO | `'USER'` | `ADMIN` \| `USER` \| `VIEWER` |
 | `status` | VARCHAR(20) | NO | `'ACTIVE'` | `ACTIVE` \| `INACTIVE` \| `LOCKED` \| `WITHDRAWN` |
-| `profile_image_url` | VARCHAR(500) | YES | NULL | Profile image URL |
 | `failed_login_count` | INT | NO | `0` | Consecutive login failure count |
 | `locked_until` | DATETIME | YES | NULL | Lock release time (NULL = not locked) |
 | `password_changed_at` | DATETIME | YES | NULL | Last password change time |
 | `last_login_at` | DATETIME | YES | NULL | Last login time |
 | `last_login_ip` | VARCHAR(45) | YES | NULL | Last login IP (supports IPv6) |
-| `email_verified` | CHAR(1) | NO | `'N'` | Email verification status `Y`/`N` |
-| `email_verified_at` | DATETIME | YES | NULL | Email verification completion time |
-| `oauth_provider` | VARCHAR(20) | YES | NULL | `google` \| `kakao` \| `github` |
-| `oauth_provider_id` | VARCHAR(200) | YES | NULL | Social provider unique ID |
 | `created_at` | DATETIME | NO | CURRENT_TIMESTAMP | Registration time |
 | `updated_at` | DATETIME | NO | CURRENT_TIMESTAMP ON UPDATE | Last updated time |
 
@@ -215,7 +210,10 @@
 | `generated_sql` | TEXT | YES | NULL | LLM-generated SQL (audit log purpose) |
 | `result_type` | VARCHAR(20) | NO | — | `EXTRACT` \| `VISUALIZE` |
 | `status` | VARCHAR(20) | NO | `'PROCESSING'` | `PROCESSING` \| `COMPLETED` \| `FAILED` |
+| `sql_result` | JSON | YES | NULL | SQL Query Result JSON |
 | `file_path` | VARCHAR(500) | YES | NULL | Result file path (e.g. `/data/results/42/result.xlsx`) |
+| `graph_markup` | MEDIUMTEXT | YES | NULL | Analysis Result Visualized HTML Mark Up |
+| `analysis_result` | TEXT | YES | NULL | Analysis Result |
 | `expires_at` | DATETIME | NO | — | Expiration time (`requested_at + 2 days`) |
 | `unused` | CHAR(1) | NO | `'N'` | Hidden flag `Y`/`N` (DB record is never deleted) |
 | `file_deleted` | CHAR(1) | NO | `'N'` | Physical file deleted flag `Y`/`N` |

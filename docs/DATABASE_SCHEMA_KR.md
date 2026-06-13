@@ -109,16 +109,11 @@
 | `display_name` | VARCHAR(100) | NO | — | 화면 표시 이름 |
 | `role` | VARCHAR(20) | NO | `'USER'` | `ADMIN` \| `USER` \| `VIEWER` |
 | `status` | VARCHAR(20) | NO | `'ACTIVE'` | `ACTIVE` \| `INACTIVE` \| `LOCKED` \| `WITHDRAWN` |
-| `profile_image_url` | VARCHAR(500) | YES | NULL | 프로필 이미지 URL |
 | `failed_login_count` | INT | NO | `0` | 연속 로그인 실패 횟수 |
 | `locked_until` | DATETIME | YES | NULL | 잠금 해제 일시 (NULL=미잠금) |
 | `password_changed_at` | DATETIME | YES | NULL | 마지막 비밀번호 변경 일시 |
 | `last_login_at` | DATETIME | YES | NULL | 마지막 로그인 일시 |
 | `last_login_ip` | VARCHAR(45) | YES | NULL | 마지막 로그인 IP (IPv6 포함) |
-| `email_verified` | CHAR(1) | NO | `'N'` | 이메일 인증 여부 `Y`/`N` |
-| `email_verified_at` | DATETIME | YES | NULL | 이메일 인증 완료 일시 |
-| `oauth_provider` | VARCHAR(20) | YES | NULL | `google` \| `kakao` \| `github` |
-| `oauth_provider_id` | VARCHAR(200) | YES | NULL | 소셜 제공자 고유 ID |
 | `created_at` | DATETIME | NO | CURRENT_TIMESTAMP | 가입 일시 |
 | `updated_at` | DATETIME | NO | CURRENT_TIMESTAMP ON UPDATE | 수정 일시 |
 
@@ -146,7 +141,7 @@
 
 ---
 
-### 3-3. target_systems (분析 대상 시스템)
+### 3-3. target_systems (분석 대상 시스템)
 
 | 컬럼명 | 타입 | NULL | 기본값 | 설명 |
 |--------|------|:----:|--------|------|
@@ -213,7 +208,10 @@
 | `generated_sql` | TEXT | YES | NULL | LLM이 생성한 SQL (감사 로그용) |
 | `result_type` | VARCHAR(20) | NO | — | `EXTRACT` \| `VISUALIZE` |
 | `status` | VARCHAR(20) | NO | `'PROCESSING'` | `PROCESSING` \| `COMPLETED` \| `FAILED` |
+| `sql_result` | JSON | YES | NULL | SQL 쿼리 결과 JSON |
 | `file_path` | VARCHAR(500) | YES | NULL | 결과 파일 경로 (예: `/data/results/42/result.xlsx`) |
+| `graph_markup` | MEDIUMTEXT | YES | NULL | 분석 결과 시각화 HTML Mark Up |
+| `analysis_result` | TEXT | YES | NULL | 분석 결과 |
 | `expires_at` | DATETIME | NO | — | 만료 일시 (`requested_at + 2일`) |
 | `unused` | CHAR(1) | NO | `'N'` | 비노출 여부 `Y`/`N` (DB 레코드는 삭제하지 않음) |
 | `file_deleted` | CHAR(1) | NO | `'N'` | 파일 물리 삭제 여부 `Y`/`N` |
