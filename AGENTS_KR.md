@@ -1,6 +1,6 @@
-# AGENTS.md — NL-to-SQL 데이터 플랫폼
+# AGENTS.md — Hyperion, NL-to-SQL 데이터 플랫폼
 
-> 이 파일은 AI 에이전트(Claude, Cursor, Copilot 등)와 인간 개발자가 이 프로젝트에서  
+> 이 파일은 AI 에이전트(Claude, Cursor, Copilot 등)와 개발자가 이 프로젝트에서  
 > 코드를 작성하거나 리뷰할 때 반드시 준수해야 할 규칙과 설계 원칙을 정의합니다.  
 > 모든 코드 생성 및 수정은 이 문서를 최우선 기준으로 삼습니다.
 
@@ -9,9 +9,10 @@
 ## 참조 문서
 
 | 문서 | 설명 |
-|------|------|
-| [architecture-design-v7.md](./docs/architecture-design-v7.md) | 전체 시스템 아키텍처, 도메인 모델, 인프라, 임베딩 파이프라인 설계 |
-| [api-specification.md](./docs/api-specification.md) | 전체 REST API 및 WebSocket 프로토콜 명세 |
+|-|-|
+| [ARCHITECTURE_DESIGN_KR.md](./docs/ARCHITECTURE_DESIGN_KR.md)| 전체 시스템 아키텍처, 도메인 모델, 인프라, 임베딩 파이프라인 설계 |
+| [DATABASE_SCHEMA_KR.md](./docs/DATABASE_SCHEMA_KR.md)| NL-to-SQL 데이터 플랫폼의 플랫폼 메타 DB 스키마를 정의                                                   |
+| [API_SPECIFICATION_KR.md](./docs/API_SPECIFICATION_KR.md)| 전체 REST API 및 WebSocket 프로토콜 명세 |
 
 코드를 작성하기 전에 반드시 두 문서를 확인합니다. 설계 문서와 충돌하는 구현은 허용하지 않습니다.
 

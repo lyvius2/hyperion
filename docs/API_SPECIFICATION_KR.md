@@ -1,7 +1,7 @@
-# NL-to-SQL 데이터 플랫폼 — API 명세서
+# Hyperion, NL-to-SQL 데이터 플랫폼 — API 명세서
 
 > 작성일: 2026-06-12  
-> Base URL: `https://your-domain.com`  
+> Base URL: `https://hyperion.furaiki-lifelog.com`  
 > 인증 방식: Bearer Token (JWT)  
 > 응답 형식: `application/json` (파일 다운로드 제외)  
 > 문자 인코딩: UTF-8

@@ -1,4 +1,4 @@
-# NL-to-SQL Data Platform — Database Schema and Table Relationship Specification
+# Hyperion, NL-to-SQL Data Platform — Database Schema and Table Relationship Specification
 
 > Date: 2026-06-12  
 > DBMS: MySQL 8.0 (Platform Meta DB)  
@@ -6,6 +6,8 @@
 > Timezone: Asia/Seoul (UTC+9)
 
 ---
+
+[한국어(Korean) 문서](DATABASE_SCHEMA_KR.md)
 
 ## 1. Full ERD
 

@@ -6,12 +6,15 @@
 
 ---
 
+[한국어(Korean) 문서](AGENTS_KR.md)
+
 ## Reference Documents
 
 | Document | Description |
-|----------|-------------|
-| [architecture-design-v7.md](./docs/architecture-design-v7.md) | Full system architecture, domain models, infrastructure, and embedding pipeline design |
-| [api-specification.md](./docs/api-specification.md) | Complete REST API and WebSocket protocol specification |
+|-|-|
+| [ARCHITECTURE_DESIGN.md](./docs/ARCHITECTURE_DESIGN.md) | Full system architecture, domain models, infrastructure, and embedding pipeline design |
+| [DATABASE_SCHEMA.md](./docs/DATABASE_SCHEMA.md) | Defines the platform meta DB schema for the NL-to-SQL Data Platform |
+| [API_SPECIFICATION.md](./docs/API_SPECIFICATION.md) | Complete REST API and WebSocket protocol specification |
 
 Always read both documents before writing code. Any implementation that conflicts with the design documents is not permitted.
 
