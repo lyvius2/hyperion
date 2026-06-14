@@ -1060,7 +1060,7 @@ services:
     ports:
       - "127.0.0.1:3306:3306"         # 루프백만 노출
     volumes:
-      - /data/mysql:/var/lib/mysql     # 데이터 영구 보존
+      - ./data/mysql:/var/lib/mysql     # 데이터 영구 보존
       - ./init-sql:/docker-entrypoint-initdb.d  # 초기 DDL 자동 실행
     command:
       - --character-set-server=utf8mb4
@@ -1082,7 +1082,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - /data/chromadb:/chroma/chroma  # 벡터 데이터 영구 보존
+      - ./data/chromadb:/chroma/chroma  # 벡터 데이터 영구 보존
     environment:
       - ANONYMIZED_TELEMETRY=false
       - CHROMA_SERVER_HOST=0.0.0.0
@@ -1100,7 +1100,7 @@ services:
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
-      - /data/ollama:/root/.ollama    # ★ 모델 파일 영구 보존 핵심
+      - ./data/ollama:/root/.ollama    # ★ 모델 파일 영구 보존 핵심
     environment:
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_MODELS=/root/.ollama
@@ -1127,7 +1127,7 @@ services:
       - "127.0.0.1:6379:6379"    # loopback 전용
     command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
-      - /data/redis:/data         # 세션 데이터 영속성
+      - ./data/redis:/data         # 세션 데이터 영속성
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
@@ -1174,9 +1174,9 @@ services:
       JAVA_OPTS: "-Xms512m -Xmx2g -XX:+UseG1GC"
       TZ: Asia/Seoul
     volumes:
-      - /data/systems:/data/systems
-      - /data/results:/data/results
-      - /tmp/nl-platform:/tmp/nl-platform
+      - ./data/systems:/data/systems
+      - ./data/results:/data/results
+      - ./tmp/nl-platform:/tmp/nl-platform
 
 networks:
   default:

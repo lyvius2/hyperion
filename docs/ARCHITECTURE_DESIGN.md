@@ -1067,7 +1067,7 @@ services:
     ports:
       - "127.0.0.1:3306:3306"         # loopback only
     volumes:
-      - /data/mysql:/var/lib/mysql     # persistent data
+      - ./data/mysql:/var/lib/mysql     # persistent data
       - ./init-sql:/docker-entrypoint-initdb.d  # auto-run initial DDL
     command:
       - --character-set-server=utf8mb4
@@ -1089,7 +1089,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - /data/chromadb:/chroma/chroma  # persistent vector data
+      - ./data/chromadb:/chroma/chroma  # persistent vector data
     environment:
       - ANONYMIZED_TELEMETRY=false
       - CHROMA_SERVER_HOST=0.0.0.0
@@ -1107,7 +1107,7 @@ services:
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
-      - /data/ollama:/root/.ollama    # ★ KEY: persistent model file storage
+      - ./data/ollama:/root/.ollama    # ★ KEY: persistent model file storage
     environment:
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_MODELS=/root/.ollama
@@ -1134,7 +1134,7 @@ services:
       - "127.0.0.1:6379:6379"    # loopback only
     command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
-      - /data/redis:/data         # persistent session data
+      - ./data/redis:/data         # persistent session data
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
@@ -1181,9 +1181,9 @@ services:
       JAVA_OPTS: "-Xms512m -Xmx2g -XX:+UseG1GC"
       TZ: Asia/Seoul
     volumes:
-      - /data/systems:/data/systems
-      - /data/results:/data/results
-      - /tmp/nl-platform:/tmp/nl-platform
+      - ./data/systems:/data/systems
+      - ./data/results:/data/results
+      - ./tmp/nl-platform:/tmp/nl-platform
 
 networks:
   default:
