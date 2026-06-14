@@ -40,7 +40,7 @@
 
 | # | Requirement | Status | Notes |
 |---|-------------|:------:|-------|
-| 2 | SQL/coding-specialized LLM model | ✅ | `gpt-oss:20b` in use (initially considered: `deepseek-coder:6.7b`) |
+| 2 | SQL/coding-specialized LLM model | ✅ | `gpt-oss:20b` (tentative); finalized via the Phase 2-end benchmark gate (§20-A) |
 | 3 | Markdown + SQL DDL + source code RAG | ✅ | Dedicated chunking per type + embedding pipeline |
 | 4~7 | Natural language → SQL → Excel, async + WebSocket | ✅ | Spring WebSocket + Kotlin Coroutine |
 | 8~10 | Natural language → SQL → d3.js HTML → ZIP | ✅ | Two-stage LLM call |
@@ -56,24 +56,45 @@
 
 ## 2. Key Design Decisions
 
-### 2-1. Fine-tuning vs RAG — Understanding the Two Stages of RAG
+### 2-1. Fine-tuning vs RAG — Why We Chose RAG
+
+This platform generates SQL against the **live schemas of multiple operational systems**.
+For this workload, fine-tuning is rejected not because it is "too difficult," but because
+**RAG is structurally superior**.
+
+| Concern | RAG (chosen) | Fine-tuning |
+|---------|--------------|-------------|
+| Schema drift | Re-embed only the changed file (seconds) | Retrain model (hours to days) |
+| Multi-system isolation | Separate ChromaDB collection per system | Per-system adapter required → ops nightmare |
+| Onboarding a new system | Immediately usable on registration | Cold start (training queue) |
+| Hallucination control | Original DDL injected verbatim → exact column names | Hallucinations persist even after weight absorption |
+| Auditability / debugging | Used chunks logged → traceable | Weights are opaque |
+| Hardware | T4 16GB is enough for inference | Fine-tuning a 20B model needs A100/H100 |
+| Change blast radius | Reindex only | Separate training pipeline + MLOps |
+
+> Fine-tuning may eventually have a supplementary role (e.g., a small LoRA adapter for in-house
+> SQL style, or distillation into a smaller model), but only **after RAG hits a quality ceiling**.
+> Until then, improving retrieval quality has a far higher ROI.
+
+#### RAG Two-Stage Flow
 
 ```
 ━━━ Stage 1: Embedding (Pre-work — once + on every change) ━━━━━━━
 
 Documents/DDL/Code → Chunking → nomic-embed-text → Vectors → ChromaDB storage
 
-  · gpt-oss:20b is not involved in this stage at all
+  · The generation model is NOT involved in this stage
   · This is NOT "memorizing" documents. It converts text into numerical coordinates
   · When documents change, only re-embedding is needed — no retraining required
 
 ━━━ Stage 2: RAG Runtime (on every user request) ━━━━━━━━━━━━━━━━━
 
-Question → nomic-embed-text → Vector → ChromaDB similarity search
+Question → nomic-embed-text → Vector → ChromaDB similarity (+ BM25 hybrid)
+         → Cross-encoder reranker re-ranks top-K
          → Retrieve 5~6 relevant chunks → Insert into prompt
-         → Call gpt-oss:20b → Generate SQL
+         → Call generation model → Generate SQL
 
-  · gpt-oss:20b reads the context fresh on every request and generates SQL
+  · The generation model reads the context fresh on every request
   · Per-system ChromaDB collection isolation → No cross-system data contamination
 ```
 
@@ -475,10 +496,15 @@ LLM-generated SQL
 
 ### 9-1. Separation of Roles Between Two Models
 
-| Model | Stage | Role |
-|-------|-------|------|
-| `nomic-embed-text` | Pre-embedding + runtime query conversion | Converts text → 384-dimension vectors only |
-| `gpt-oss:20b` | Runtime SQL/HTML generation | Reads prompt context and generates SQL on the spot (initially considered: `deepseek-coder:6.7b`) |
+| Model (default) | Stage | Role |
+|-----------------|-------|------|
+| `nomic-embed-text` v1.5 | Pre-embedding + runtime query conversion | Converts text → **768-dimension** vectors only |
+| `gpt-oss:20b` (tentative) | Runtime SQL/HTML generation | Reads prompt context and generates SQL on the spot |
+
+> **Model names are never hardcoded.** They are injected via `application.yaml`
+> (`app.ollama.embedding-model`, `app.ollama.generation-model`) and finalized after the
+> benchmark gate at the end of Phase 2 (§20). Candidates: `gpt-oss:20b`,
+> `qwen2.5-coder:7b`, `deepseek-coder:6.7b`.
 
 ### 9-2. Full Pipeline Flow
 
@@ -491,8 +517,8 @@ LLM-generated SQL
                .sql  → SqlDdlChunker    (entire CREATE TABLE = 1 chunk, synthesize DDL + description)
                .java/.kt → SourceCodeChunker (JavaParser AST, method-level)
           ▼ 3. SHA-256 hash → SKIP if unchanged
-          ▼ 4. Ollama nomic-embed-text (batches of 10)
-               text → FloatArray(384 dimensions)
+          ▼ 4. Ollama `/api/embed` true batch call (N inputs per request)
+               text → FloatArray(768 dimensions)
           ▼ 5. ChromaDB upsert (batches of 100)
                collection: sys_{name}_{hash}
                stored: vector + original text + metadata (type, source_path, table_name, etc.)
@@ -624,40 +650,78 @@ class SourceCodeChunker(
 
 ### 9-5. OllamaClient — Embedding + Inference
 
+**Model names are injected via `OllamaProperties`.** The client uses Ollama's newer
+`/api/embed` endpoint for true batch embedding (the older `/api/embeddings` accepts only a
+single input).
+
 ```kotlin
+@ConfigurationProperties(prefix = "app.ollama")
+data class OllamaProperties(
+    val baseUrl: String,
+    val embeddingModel: String = "nomic-embed-text",
+    val generationModel: String = "gpt-oss:20b",
+    val embeddingBatchSize: Int = 64,         // inputs per batched call
+    val generationTemperature: Double = 0.1,
+    val generationMaxTokens: Int = 1024
+)
+
 @Component
-class OllamaClient(@Value("\${app.ollama.base-url}") private val baseUrl: String,
-                   private val webClient: WebClient) {
+class OllamaClient(
+    private val props: OllamaProperties,
+    private val webClient: WebClient
+) {
+    // ── Single embedding (used for runtime query conversion) ─────────────
+    suspend fun embed(text: String): FloatArray = embedBatch(listOf(text)).first()
 
-    // ── Embedding (pre-work + runtime query conversion) ─────────────────
-    suspend fun embed(text: String): FloatArray {
-        val res = webClient.post().uri("$baseUrl/api/embeddings")
-            .bodyValue(mapOf("model" to "nomic-embed-text", "prompt" to text))
-            .retrieve().awaitBody<EmbeddingResponse>()
-        return res.embedding.toFloatArray()
-    }
-
-    // Ollama does not support batch API → process sequentially in groups of 10
+    // ── True batch embedding via `/api/embed` (input: List<String>) ─────
     suspend fun embedBatch(texts: List<String>): List<FloatArray> =
-        texts.chunked(10).flatMap { batch -> batch.map { embed(it) } }
+        texts.chunked(props.embeddingBatchSize).flatMap { batch ->
+            val res = webClient.post().uri("${props.baseUrl}/api/embed")
+                .bodyValue(mapOf(
+                    "model" to props.embeddingModel,
+                    "input" to batch
+                ))
+                .retrieve().awaitBody<EmbedResponse>()
+            res.embeddings.map { it.toFloatArray() }
+        }
 
     // ── SQL/HTML generation (runtime) ──────────────────────────────────
-    suspend fun generate(prompt: String, temperature: Double = 0.1): String {
-        val res = webClient.post().uri("$baseUrl/api/generate")
+    suspend fun generate(
+        prompt: String,
+        temperature: Double = props.generationTemperature
+    ): String {
+        val res = webClient.post().uri("${props.baseUrl}/api/generate")
             .bodyValue(mapOf(
-                "model"   to "gpt-oss:20b",  // changed from deepseek-coder:6.7b
+                "model"   to props.generationModel,
                 "prompt"  to prompt,
                 "stream"  to false,
-                "options" to mapOf("temperature" to temperature, "num_predict" to 1024)
+                "options" to mapOf(
+                    "temperature" to temperature,
+                    "num_predict" to props.generationMaxTokens
+                )
             ))
             .retrieve().awaitBody<GenerateResponse>()
         return res.response.trim()
     }
 
-    data class EmbeddingResponse(val embedding: List<Float>)
+    data class EmbedResponse(val embeddings: List<List<Float>>)
     data class GenerateResponse(val response: String)
 }
 ```
+
+```yaml
+# application.yaml — swap models by editing YAML, no code changes
+app:
+  ollama:
+    base-url: http://ollama:11434
+    embedding-model: nomic-embed-text          # 768-dim
+    generation-model: gpt-oss:20b              # may be replaced after the benchmark gate
+    embedding-batch-size: 64
+    generation-temperature: 0.1
+    generation-max-tokens: 1024
+```
+
+> **Forbidden:** writing model names as string literals inside `OllamaClient`. See AGENTS.md §5-7.
 
 ### 9-6. ChromaDbClient — Storage and Search
 
@@ -715,6 +779,33 @@ class ChromaDbClient(@Value("\${app.chromadb.base-url}") private val baseUrl: St
 
 ### 9-7. DocumentIngestionPipeline — Pipeline Assembly
 
+> **`GlobalScope.launch` is forbidden.** Background work runs on the lifecycle-managed
+> `ApplicationCoroutineScope` bean. (see §9-7-a)
+
+#### 9-7-a. ApplicationCoroutineScope bean
+
+```kotlin
+@Configuration
+class CoroutineConfig {
+    /**
+     * Explicit scope so in-flight jobs are cancelled cleanly at shutdown.
+     * SupervisorJob keeps sibling jobs alive when one fails.
+     */
+    @Bean(destroyMethod = "close")
+    fun applicationCoroutineScope(): ApplicationCoroutineScope =
+        ApplicationCoroutineScope()
+}
+
+class ApplicationCoroutineScope : CoroutineScope, AutoCloseable {
+    private val job = SupervisorJob()
+    override val coroutineContext = job + Dispatchers.IO +
+        CoroutineName("hyperion-app")
+    override fun close() { job.cancel() }   // invoked on @PreDestroy
+}
+```
+
+#### 9-7-b. Pipeline code
+
 ```kotlin
 @Service
 class DocumentIngestionPipeline(
@@ -725,11 +816,11 @@ class DocumentIngestionPipeline(
     private val chromaDbClient: ChromaDbClient,
     private val systemRepo: TargetSystemRepository,
     private val fileRepo: SystemFileRepository,
-    private val jobHistoryService: JobHistoryService
+    private val jobHistoryService: JobHistoryService,
+    private val appScope: ApplicationCoroutineScope   // ★ injected
 ) {
-    @OptIn(DelicateCoroutinesApi::class)
     fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
-        GlobalScope.launch(Dispatchers.IO) { run(system, mode, triggeredBy) }
+        appScope.launch { run(system, mode, triggeredBy) }
     }
 
     suspend fun run(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
@@ -812,39 +903,92 @@ File modification time > lastIngestedAt?
 
 ## 10. RAG Runtime Search Flow
 
+### 10-1. Three-Stage Retrieval (Dense + Sparse Hybrid → Reranker → Context Assembly)
+
+Cosine similarity alone often pulls in chunks whose table/column names are *similar but
+from a different domain*. Since the next ceiling of SQL-generation accuracy is almost
+always retrieval quality, we apply three stages.
+
+```
+User question
+  │
+  ▼ ① Query embedding (nomic-embed-text, "search_query:" prefix)
+  │
+  ├──▶ Dense search  (ChromaDB cosine, topK=10 per type) ──┐
+  │                                                         ├─▶ ② Candidate union (≤ ~30)
+  └──▶ Sparse search (BM25, table/column keyword match)  ──┘
+                                                              │
+                                                              ▼ ③ Cross-encoder rerank
+                                                                (bge-reranker-base)
+                                                              │
+                                                              ▼ Pick top-6
+                                                              │
+                                                              ▼ Type ratio (DDL≥3, code≥2, MD≥1)
+                                                              │
+                                                              ▼ Assemble context → generation
+```
+
+| Stage | Component | Responsibility |
+|-------|-----------|----------------|
+| Dense | `ChromaDbClient.query()` | Semantic similarity |
+| Sparse | `BM25Index` (in-process Lucene) | Exact identifier match |
+| Rerank | `RerankerClient` (e.g. `bge-reranker-base` hosted on Ollama/Triton) | Question-chunk fit |
+| Compose | `ContextAssembler` | Type ratios, dedupe, token-budget |
+
+### 10-2. Implementation
+
 ```kotlin
-suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
-    // ① Convert question to vector
-    val queryVector = ollamaClient.embed(naturalLanguage)
+@Service
+class LlmOrchestrationService(
+    private val ollamaClient: OllamaClient,
+    private val chromaDbClient: ChromaDbClient,
+    private val bm25Index: BM25Index,
+    private val reranker: RerankerClient,
+    private val promptBuilder: PromptBuilder
+) {
+    suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
+        // ① Query embedding (task prefix is mandatory — AGENTS §11-6)
+        val queryVector = ollamaClient.embed("search_query: $naturalLanguage")
 
-    // ② Weighted search by type (SQL generation: DDL first)
-    val chunks = chromaDbClient.query(system.chromaCollection, queryVector, topK=3,
-                    typeFilter=listOf("sql_ddl")) +
-                 chromaDbClient.query(system.chromaCollection, queryVector, topK=2,
-                    typeFilter=listOf("source_code")) +
-                 chromaDbClient.query(system.chromaCollection, queryVector, topK=1,
-                    typeFilter=listOf("markdown"))
+        // ② Dense + Sparse candidates in parallel
+        val denseDeferred  = coroutineScope { async {
+            chromaDbClient.query(system.chromaCollection, queryVector, topK = 10)
+        } }
+        val sparseDeferred = coroutineScope { async {
+            bm25Index.search(system.id, naturalLanguage, topK = 10)
+        } }
+        val candidates = (denseDeferred.await() + sparseDeferred.await())
+            .distinctBy { it.id }
 
-    // ③ Remove low-similarity chunks and assemble context
-    val context = chunks.sortedByDescending { it.similarity }
-                        .joinToString("\n\n---\n\n") { it.text }
+        // ③ Cross-encoder reranker selects top-6
+        val reranked = reranker.rerank(naturalLanguage, candidates, topK = 6)
 
-    // ④ English prompt + call gpt-oss:20b
-    return ollamaClient.generate("""
-        [SYSTEM]
-        You are an expert SQL generator for the "${system.name}" system.
-        Target DBMS: ${system.dbType}
-        Use ONLY the context below. Generate ONLY a valid SQL SELECT statement.
-        If not about data extraction, respond EXACTLY: "데이터 추출 요구 아님"
+        // ④ Enforce type ratios + assemble context
+        val context = ContextAssembler.assemble(
+            chunks = reranked,
+            ratios = mapOf("sql_ddl" to 3, "source_code" to 2, "markdown" to 1)
+        )
 
-        [CONTEXT — retrieved from knowledge base]
-        $context
-
-        [USER REQUEST]
-        $naturalLanguage
-    """.trimIndent())
+        // ⑤ Externalised prompt template (AGENTS §16)
+        val prompt = promptBuilder.buildSqlGenerationPrompt(
+            nl = naturalLanguage,
+            dbType = system.dbType.name,
+            systemName = system.name,
+            context = context
+        )
+        return ollamaClient.generate(prompt)
+    }
 }
 ```
+
+### 10-3. Reranker Hosting — Prefer Light Models
+
+- Default: `bge-reranker-base` (~278 MB) — loaded on the same GPU as the generation model
+- Alternative: `bge-reranker-v2-m3` (multilingual, ~1.5 GB) — pick this if Korean queries dominate
+- Latency target: < 200 ms on T4 for 6–30 candidates
+
+> **Phased rollout:** Phase 3 ships Dense-only retrieval. Phase 4 enables Hybrid + Reranker,
+> each guarded by a feature flag (`app.retrieval.hybrid.enabled`, `app.retrieval.rerank.enabled`).
 
 ---
 
@@ -860,10 +1004,13 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 └── models/
     ├── manifests/
     │   └── registry.ollama.ai/library/
-    │       ├── gpt-oss/          ← model metadata (changed from deepseek-coder)
-    │       └── nomic-embed-text/
+    │       ├── gpt-oss/          ← generation model (tentative, finalized after §20-A bench)
+    │       ├── qwen2.5-coder/    ← benchmark candidate
+    │       ├── deepseek-coder/   ← benchmark candidate
+    │       ├── nomic-embed-text/ ← embeddings (768-dim)
+    │       └── bge-reranker-base/ ← reranker (Phase 4)
     └── blobs/                    ← actual weight files
-        ├── sha256-xxxx...        ← gpt-oss:20b (~11GB)
+        ├── sha256-xxxx...        ← gpt-oss:20b (~13GB)
         └── sha256-yyyy...        ← nomic-embed-text (~274MB)
 ```
 
@@ -871,8 +1018,13 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 
 ```bash
 # Run inside the Ollama container
-docker compose exec ollama ollama pull gpt-oss:20b   # ~11GB, 30~60 min (changed from deepseek-coder:6.7b)
-docker compose exec ollama ollama pull nomic-embed-text       # ~274MB, 1~2 min
+docker compose exec ollama ollama pull gpt-oss:20b              # ~13GB, 30~60 min (tentative — finalize via §20-A)
+docker compose exec ollama ollama pull nomic-embed-text         # ~274MB, 1~2 min
+# Optional candidates for the benchmark gate (§20-A):
+# docker compose exec ollama ollama pull qwen2.5-coder:7b       # ~4.7GB
+# docker compose exec ollama ollama pull deepseek-coder:6.7b    # ~3.8GB
+# Phase 4 reranker:
+# docker compose exec ollama ollama pull bge-reranker-base      # ~278MB (or HF/Triton)
 
 # Verify
 docker compose exec ollama ollama list
@@ -923,7 +1075,7 @@ services:
 
   # ── ChromaDB (Vector DB) ─────────────────────────────────────────────
   chromadb:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.5.23   # pinned version (no :latest — reproducibility / no surprise regressions)
     container_name: nlp-chromadb
     restart: unless-stopped
     ports:
@@ -941,7 +1093,7 @@ services:
 
   # ── Ollama (LLM Runtime) ─────────────────────────────────────────────
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.5.11     # pinned version (no :latest — reproducibility / no surprise regressions)
     container_name: nlp-ollama
     restart: unless-stopped
     ports:
@@ -1170,16 +1322,22 @@ server {
 | D. High performance | `g5.xlarge` | 16GB | A10G 22GB | ~$830 | 13B models |
 
 ```
-EBS gp3 250 GB
+EBS gp3 300 GB
 
 /                       30 GB  OS + Docker images
 /data/
-  ├── ollama/           50 GB  LLM models (deepseek ~3.8GB + nomic ~274MB + buffer)
+  ├── ollama/           60 GB  LLM models (gpt-oss:20b ~13GB + nomic-embed-text ~274MB
+  │                              + reranker ~1.5GB + candidate-model buffer)
   ├── chromadb/         20 GB  persistent vector DB data
   ├── mysql/            10 GB  platform meta DB
-  ├── systems/         130 GB  per-system docs/ddl/sourcetree
+  ├── redis/             5 GB  session store (room for AOF)
+  ├── systems/         150 GB  per-system docs/ddl/sourcetree
   └── results/          10 GB  generated Excel/HTML (2-day TTL)
 ```
+
+> Keeping `/data/ollama` at 60 GB allows holding the chosen generation model
+> alongside candidates (`qwen2.5-coder:7b` ~4.7 GB, `deepseek-coder:6.7b` ~3.8 GB) during
+> benchmarking and rollback.
 
 ---
 
@@ -1248,21 +1406,22 @@ dependencies {
 ## 16. Prompt Language Strategy
 
 **Prompts are written in English; the rejection response is explicitly instructed in Korean.**
-
-SQL generation specialized models have an overwhelming proportion of English training data, so English prompts produce better SQL quality.
+SQL-specialised and code-trained models are dominated by English training data, so English
+system prompts yield better SQL quality. All prompts are externalised as `.md` templates in
+`src/main/resources/prompts/` (see AGENTS.md §16).
 
 ```
 [SYSTEM - English]
-You are an expert SQL generator for the "{system.name}" system.
-Target DBMS: {system.dbType}
+You are an expert SQL generator for the "{{system_name}}" system.
+Target DBMS: {{db_type}}
 Use ONLY the context below. Generate ONLY a valid SQL SELECT statement.
 If not about data extraction, respond EXACTLY: "데이터 추출 요구 아님"
 
 [CONTEXT — retrieved from knowledge base]
-{3 DDL chunks + 2 source code chunks + 1 Markdown chunk}
+{{context}}    ← DDL ≥3 + source code ≥2 + Markdown ≥1 (post-reranker)
 
 [USER REQUEST]
-{user natural language input}
+{{natural_language}}
 ```
 
 ---
@@ -1351,17 +1510,28 @@ Board:       GET /board                list
 
 ## 19. Non-Functional Requirements and Limitations
 
-| Item | GPU Instance Baseline |
-|------|:---------------------:|
-| LLM SQL generation | 5~15 sec |
-| EXPLAIN validation | < 500ms |
-| ChromaDB search | < 25ms |
-| Excel generation (10,000 rows) | 1~3 sec |
-| Embedding (1,000 chunks) | ~50 sec |
-| Git clone (large repo) | Several minutes (async) |
+| Item | T4 16GB | A10G 22GB |
+|------|:-------:|:---------:|
+| LLM SQL generation (gpt-oss:20b) | 8~20 sec | 4~10 sec |
+| LLM SQL generation (qwen2.5-coder:7b) | 2~5 sec | 1~3 sec |
+| EXPLAIN validation | < 500 ms | < 500 ms |
+| Dense search (ChromaDB) | < 25 ms | < 25 ms |
+| Hybrid (Dense+BM25) search | < 60 ms | < 60 ms |
+| Reranker (bge-reranker-base, 30 candidates) | < 200 ms | < 80 ms |
+| Excel generation (10,000 rows) | 1~3 sec | 1~3 sec |
+| Embedding (1,000 chunks, batch=64) | ~10 sec | ~6 sec |
+| Git clone (large repo) | Several min (async) | Several min (async) |
 
-**Known Limitations:**  
-Oracle/MSSQL EXPLAIN parsing is significantly more complex than MySQL/PostgreSQL. Incremental addition in Phase 5 is recommended.
+> Embedding latency drops from prior ~50 s to ~10 s thanks to the true `/api/embed` batch
+> endpoint with `batch=64`.
+
+**Known Limitations:**
+- Oracle/MSSQL EXPLAIN parsing is significantly more complex than MySQL/PostgreSQL —
+  incremental addition is targeted for Phase 5.
+- `gpt-oss:20b` is not SQL-specialised. If accuracy is insufficient, switch to
+  `qwen2.5-coder:7b` or `deepseek-coder:6.7b` per the §20-A benchmark gate.
+- The cross-encoder reranker consumes additional GPU memory (~1.5 GB headroom required on T4
+  when sharing the GPU with the generation model).
 
 ---
 
@@ -1374,25 +1544,37 @@ Phase 1 — Infrastructure + Domain Foundation (3 weeks)
   ├── Session-based authentication (login/logout/heartbeat API)
   ├── TargetSystem + SystemFile entities
   ├── DynamicDataSourceFactory + TokenEncryptor
+  ├── ApplicationCoroutineScope bean (§9-7-a)
   └── SystemDirectoryManager + ChromaDB collection management
 
 Phase 2 — Embedding Pipeline (2 weeks)
   ├── JobHistory entity + JobHistoryService
-  ├── OllamaClient (embed + generate)
-  ├── ChromaDbClient (upsert + query)
+  ├── OllamaClient (OllamaProperties-injected, /api/embed batch)
+  ├── ChromaDbClient (upsert + query, 768-dim)
   ├── MarkdownChunker + SqlDdlChunker + SourceCodeChunker
   ├── DocumentIngestionPipeline (FULL/INCREMENTAL/SINGLE)
   └── Git Sync API + automatic embedding trigger
 
+[End of Phase 2] A. Generation-model Benchmark Gate (3~5 days)
+  ├── Candidates: gpt-oss:20b vs qwen2.5-coder:7b vs deepseek-coder:6.7b
+  ├── Eval set: 100 internal NL-SQL pairs (covering ≥ 3 systems)
+  ├── Metrics: (1) SQL exact-match (2) execution-match (3) p50/p95 latency
+  │           (4) GPU memory (5) quality drop under 4-bit quantisation
+  └── Pass bar: p95 latency ≤ 8 s (T4) or ≤ 4 s (A10G) AND exec-match ≥ 70%
+             → pin the lightest model that passes into application.yaml
+
 Phase 3 — SQL Validation + Extraction + Board (3 weeks)
   ├── SqlValidator + ExplainAnalyzer (MySQL/MariaDB/PostgreSQL)
-  ├── LlmOrchestrationService (RAG + SQL generation + naming)
-  ├── NLQueryService async coroutine
+  ├── LlmOrchestrationService (Dense RAG + SQL generation + naming)
+  ├── NLQueryService async coroutine (uses ApplicationCoroutineScope)
   ├── Apache POI Excel + QueryResult board
   ├── WebSocket + ResultFileCleanupScheduler (2-day TTL)
   └── Slack file attachment delivery
 
-Phase 4 — Visualization + Admin UI (2 weeks)
+Phase 4 — Hybrid Retrieval + Visualization + Admin UI (3 weeks)
+  ├── BM25Index (in-process Lucene) + hybrid candidate union
+  ├── RerankerClient (bge-reranker-base) + ContextAssembler
+  ├── Regression run against the Phase 2-A eval set (must improve accuracy)
   ├── VisualizationService (two-stage LLM)
   ├── HTML serving API + iframe rendering
   └── Complete admin UI (Mustache)

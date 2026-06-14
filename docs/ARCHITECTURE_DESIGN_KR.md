@@ -15,7 +15,7 @@
 2. [핵심 설계 결정](#2-핵심-설계-결정)
 3. [전체 도메인 모델 개요](#3-전체-도메인-모델-개요)
 4. [도메인 1 — 회원 (Member)](#4-도메인-1--회원-member)
-5. [도메인 2 — 분析 대상 시스템 (TargetSystem)](#5-도메인-2--분析-대상-시스템-targetsystem)
+5. [도메인 2 — 분석 대상 시스템 (TargetSystem)](#5-도메인-2--분석-대상-시스템-targetsystem)
 6. [도메인 3 — 결과 게시판 (QueryResult)](#6-도메인-3--결과-게시판-queryresult)
 7. [도메인 4 — 작업 이력 (JobHistory)](#7-도메인-4--작업-이력-jobhistory)
 8. [SQL 사전 검증 전략 — PROD DB 단일 접속](#8-sql-사전-검증-전략--prod-db-단일-접속)
@@ -38,12 +38,12 @@
 
 | # | 요건 | 판정 | 비고 |
 |---|------|:----:|------|
-| 2 | SQL/코딩 특화 LLM 모델 | ✅ | `gpt-oss:20b` 사용 (초기에는 `deepseek-coder:6.7b` 검토) |
+| 2 | SQL/코딩 특화 LLM 모델 | ✅ | `gpt-oss:20b` (잠정); Phase 2 말 벤치마크 게이트(§20-A)로 확정 |
 | 3 | Markdown + SQL DDL + 소스 코드 RAG | ✅ | 타입별 전용 청킹 + 임베딩 파이프라인 |
 | 4~7 | 자연어 → SQL → Excel, 비동기 + WebSocket | ✅ | Spring WebSocket + Kotlin Coroutine |
 | 8~10 | 자연어 → SQL → d3.js HTML → ZIP | ✅ | 2단계 LLM 호출 |
 | 11 | Kotlin / Spring Boot 4 / Mustache 모놀리식 | ✅ | |
-| v4 | 분析 대상 시스템 선택 및 관리 | ✅ | 시스템별 디렉토리 + ChromaDB 격리 |
+| v4 | 분석 대상 시스템 선택 및 관리 | ✅ | 시스템별 디렉토리 + ChromaDB 격리 |
 | v5 | 결과 게시판 (2일 보관) | ✅ | 소프트 삭제 + 파일 물리 삭제 분리 |
 | v6 | PROD DB 단독 접속 (EXPLAIN 사전 검증) | ✅ | |
 | v6 | 다중 DBMS 지원 / 회원 / 작업이력 도메인 | ✅ | |
@@ -54,24 +54,43 @@
 
 ## 2. 핵심 설계 결정
 
-### 2-1. Fine-tuning vs RAG — RAG 두 단계 이해
+### 2-1. Fine-tuning vs RAG — 왜 RAG를 선택했는가
+
+이 플랫폼은 **여러 운영 시스템의 살아있는 스키마**를 대상으로 SQL을 생성합니다.
+이 요구사항에서 fine-tuning은 "어려워서" 배제한 것이 아니라, **구조적으로 RAG가 우월**하기 때문에 채택하지 않습니다.
+
+| 관점 | RAG (채택) | Fine-tuning |
+|------|----------|-------------|
+| 스키마 변경 대응 | DDL 변경 시 해당 파일만 재임베딩 (수십 초) | 모델 재학습 필요 (수 시간~수 일) |
+| 멀티 시스템 격리 | ChromaDB collection 단위로 분리 | 시스템별 어댑터 필요 → 운영 복잡 |
+| 신규 시스템 추가 | 등록 즉시 사용 가능 | Cold start (학습 큐 대기) |
+| 할루시네이션 통제 | 원본 DDL을 컨텍스트에 직접 주입 → 컬럼명 정확 | 가중치에 흡수돼도 환각 잔존 |
+| 감사/디버깅 | 사용된 청크가 로그에 남음 → 추적 가능 | 가중치는 블랙박스 |
+| 하드웨어 | T4 16GB로 추론만 수행 가능 | 20B 모델 fine-tune은 A100/H100 필요 |
+| 운영 변경 영향 | 인덱스 재구성만으로 반영 | 학습 파이프라인·MLOps 별도 필요 |
+
+> Fine-tuning을 보조 수단(예: 사내 SQL 스타일 LoRA 어댑터, 소형 모델 distillation)으로 도입할 여지는 있지만,
+> 그것은 "RAG의 품질 천장"에 부딪힌 후 검토할 사항입니다. 그 전까지는 retrieval 품질 개선이 ROI가 훨씬 큽니다.
+
+#### RAG 두 단계 흐름
 
 ```
 ━━━ 단계 1: 임베딩 (사전 작업 — 1회 + 변경 시마다) ━━━━━━━━━
 
 문서/DDL/코드 → 청킹 → nomic-embed-text → 벡터 → ChromaDB 저장
 
-  · gpt-oss:20b는 이 단계에 전혀 관여하지 않음
+  · 생성 모델은 이 단계에 전혀 관여하지 않음
   · 문서를 "암기"하는 것이 아님. 텍스트를 수치 좌표로 변환해 저장하는 것
   · 문서 변경 시 재임베딩만으로 즉시 반영 (재학습 불필요)
 
 ━━━ 단계 2: RAG 런타임 (사용자 요청마다) ━━━━━━━━━━━━━━━━━
 
-질문 → nomic-embed-text → 벡터 → ChromaDB 유사도 검색
+질문 → nomic-embed-text → 벡터 → ChromaDB 유사도 검색 (+ BM25 hybrid)
+     → cross-encoder reranker로 top-K 재순위
      → 관련 청크 5~6개 꺼냄 → 프롬프트에 삽입
-     → gpt-oss:20b 호출 → SQL 생성
+     → 생성 모델 호출 → SQL 생성
 
-  · gpt-oss:20b는 매 요청마다 context를 처음 읽고 SQL 생성
+  · 생성 모델은 매 요청마다 context를 처음 읽고 SQL 생성
   · 시스템별 ChromaDB 컬렉션 격리 → 타 시스템 데이터 오염 없음
 ```
 
@@ -247,7 +266,7 @@ spring:
 
 ---
 
-## 5. 도메인 2 — 분析 대상 시스템 (TargetSystem)
+## 5. 도메인 2 — 분석 대상 시스템 (TargetSystem)
 
 ### 5-1. DDL
 
@@ -278,7 +297,7 @@ CREATE TABLE target_systems (
     CONSTRAINT uq_target_systems_name   UNIQUE (name),
     CONSTRAINT uq_target_systems_chroma UNIQUE (chroma_collection),
     CONSTRAINT fk_target_systems_member FOREIGN KEY (created_by) REFERENCES members(id)
-) COMMENT = '분析 대상 시스템';
+) COMMENT = '분석 대상 시스템';
 
 CREATE TABLE system_files (
     id                   BIGINT       NOT NULL AUTO_INCREMENT,
@@ -473,10 +492,14 @@ LLM 생성 SQL
 
 ### 9-1. 두 모델의 역할 분리
 
-| 모델 | 단계 | 역할 |
+| 모델 (기본값) | 단계 | 역할 |
 |------|------|------|
-| `nomic-embed-text` | 사전 임베딩 + 런타임 질문 변환 | 텍스트 → 384차원 벡터만 담당 |
-| `gpt-oss:20b` | 런타임 SQL/HTML 생성 | 프롬프트 context를 읽고 그 자리에서 SQL 생성 (초기에는 `deepseek-coder:6.7b` 검토) |
+| `nomic-embed-text` v1.5 | 사전 임베딩 + 런타임 질문 변환 | 텍스트 → **768차원** 벡터만 담당 |
+| `gpt-oss:20b` (잠정) | 런타임 SQL/HTML 생성 | 프롬프트 context를 읽고 그 자리에서 SQL 생성 |
+
+> **모델명은 절대 하드코딩하지 않습니다.** `application.yaml`의 `app.ollama.embedding-model`,
+> `app.ollama.generation-model`로 주입하며, Phase 2 말 벤치마크(§20)로 최종 확정합니다.
+> 후보: `gpt-oss:20b`, `qwen2.5-coder:7b`, `deepseek-coder:6.7b`.
 
 ### 9-2. 전체 파이프라인 흐름
 
@@ -489,8 +512,8 @@ LLM 생성 SQL
                .sql  → SqlDdlChunker    (CREATE TABLE 전체 = 1청크, DDL+한국어설명 합성)
                .java/.kt → SourceCodeChunker (JavaParser AST, 메서드 단위)
           ▼ 3. SHA-256 해시 → 기존과 동일하면 SKIP
-          ▼ 4. Ollama nomic-embed-text (배치 10개씩)
-               텍스트 → FloatArray(384차원)
+          ▼ 4. Ollama `/api/embed` 진짜 배치 호출 (한 번에 N개 입력)
+               텍스트 → FloatArray(768차원)
           ▼ 5. ChromaDB upsert (100건씩 배치)
                컬렉션: sys_{name}_{hash}
                저장: 벡터 + 원문 + 메타데이터(type, source_path, table_name 등)
@@ -622,40 +645,77 @@ class SourceCodeChunker(
 
 ### 9-5. OllamaClient — 임베딩 + 추론
 
+**모델명은 `OllamaProperties`로 주입**하며, Ollama의 신규 `/api/embed` 배치 엔드포인트를 사용해
+진짜 배치 호출을 수행합니다. (구 `/api/embeddings`는 1개 입력만 받습니다.)
+
 ```kotlin
+@ConfigurationProperties(prefix = "app.ollama")
+data class OllamaProperties(
+    val baseUrl: String,
+    val embeddingModel: String = "nomic-embed-text",
+    val generationModel: String = "gpt-oss:20b",
+    val embeddingBatchSize: Int = 64,         // 한 호출에 묶을 입력 개수
+    val generationTemperature: Double = 0.1,
+    val generationMaxTokens: Int = 1024
+)
+
 @Component
-class OllamaClient(@Value("\${app.ollama.base-url}") private val baseUrl: String,
-                   private val webClient: WebClient) {
+class OllamaClient(
+    private val props: OllamaProperties,
+    private val webClient: WebClient
+) {
+    // ── 단건 임베딩 (런타임 쿼리 변환용) ─────────────────────────
+    suspend fun embed(text: String): FloatArray = embedBatch(listOf(text)).first()
 
-    // ── 임베딩 (사전 작업 + 런타임 질문 변환) ──────────────────
-    suspend fun embed(text: String): FloatArray {
-        val res = webClient.post().uri("$baseUrl/api/embeddings")
-            .bodyValue(mapOf("model" to "nomic-embed-text", "prompt" to text))
-            .retrieve().awaitBody<EmbeddingResponse>()
-        return res.embedding.toFloatArray()
-    }
-
-    // Ollama는 배치 API 미지원 → 10개씩 순차 처리
+    // ── 진짜 배치 임베딩 (`/api/embed`, input: List<String>) ────
     suspend fun embedBatch(texts: List<String>): List<FloatArray> =
-        texts.chunked(10).flatMap { batch -> batch.map { embed(it) } }
+        texts.chunked(props.embeddingBatchSize).flatMap { batch ->
+            val res = webClient.post().uri("${props.baseUrl}/api/embed")
+                .bodyValue(mapOf(
+                    "model" to props.embeddingModel,
+                    "input" to batch
+                ))
+                .retrieve().awaitBody<EmbedResponse>()
+            res.embeddings.map { it.toFloatArray() }
+        }
 
     // ── SQL/HTML 생성 (런타임) ──────────────────────────────────
-    suspend fun generate(prompt: String, temperature: Double = 0.1): String {
-        val res = webClient.post().uri("$baseUrl/api/generate")
+    suspend fun generate(
+        prompt: String,
+        temperature: Double = props.generationTemperature
+    ): String {
+        val res = webClient.post().uri("${props.baseUrl}/api/generate")
             .bodyValue(mapOf(
-                "model"   to "gpt-oss:20b",  // deepseek-coder:6.7b에서 변경
+                "model"   to props.generationModel,
                 "prompt"  to prompt,
                 "stream"  to false,
-                "options" to mapOf("temperature" to temperature, "num_predict" to 1024)
+                "options" to mapOf(
+                    "temperature" to temperature,
+                    "num_predict" to props.generationMaxTokens
+                )
             ))
             .retrieve().awaitBody<GenerateResponse>()
         return res.response.trim()
     }
 
-    data class EmbeddingResponse(val embedding: List<Float>)
+    data class EmbedResponse(val embeddings: List<List<Float>>)
     data class GenerateResponse(val response: String)
 }
 ```
+
+```yaml
+# application.yaml — 모델 교체 시 코드 수정 없이 yaml만 변경
+app:
+  ollama:
+    base-url: http://ollama:11434
+    embedding-model: nomic-embed-text          # 768-dim
+    generation-model: gpt-oss:20b              # 벤치마크 후 qwen2.5-coder:7b 등으로 교체 가능
+    embedding-batch-size: 64
+    generation-temperature: 0.1
+    generation-max-tokens: 1024
+```
+
+> **금지:** `OllamaClient` 내부에서 모델명을 문자열 리터럴로 작성하는 것. AGENTS.md §5-7 참조.
 
 ### 9-6. ChromaDbClient — 저장 및 검색
 
@@ -713,6 +773,33 @@ class ChromaDbClient(@Value("\${app.chromadb.base-url}") private val baseUrl: St
 
 ### 9-7. DocumentIngestionPipeline — 파이프라인 조립
 
+> **`GlobalScope.launch` 금지.** 백그라운드 작업은 라이프사이클이 관리되는
+> `ApplicationCoroutineScope` 빈을 주입받아 실행합니다. (§9-7-a 참조)
+
+#### 9-7-a. ApplicationCoroutineScope 빈
+
+```kotlin
+@Configuration
+class CoroutineConfig {
+    /**
+     * 애플리케이션 종료 시 진행 중인 작업을 안전하게 cancel하기 위한 명시적 스코프.
+     * SupervisorJob: 자식 코루틴 하나가 실패해도 형제 작업을 죽이지 않음.
+     */
+    @Bean(destroyMethod = "close")
+    fun applicationCoroutineScope(): ApplicationCoroutineScope =
+        ApplicationCoroutineScope()
+}
+
+class ApplicationCoroutineScope : CoroutineScope, AutoCloseable {
+    private val job = SupervisorJob()
+    override val coroutineContext = job + Dispatchers.IO +
+        CoroutineName("hyperion-app")
+    override fun close() { job.cancel() }   // @PreDestroy 시점에 호출
+}
+```
+
+#### 9-7-b. 파이프라인 코드
+
 ```kotlin
 @Service
 class DocumentIngestionPipeline(
@@ -723,11 +810,11 @@ class DocumentIngestionPipeline(
     private val chromaDbClient: ChromaDbClient,
     private val systemRepo: TargetSystemRepository,
     private val fileRepo: SystemFileRepository,
-    private val jobHistoryService: JobHistoryService
+    private val jobHistoryService: JobHistoryService,
+    private val appScope: ApplicationCoroutineScope   // ★ 주입
 ) {
-    @OptIn(DelicateCoroutinesApi::class)
     fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
-        GlobalScope.launch(Dispatchers.IO) { run(system, mode, triggeredBy) }
+        appScope.launch { run(system, mode, triggeredBy) }
     }
 
     suspend fun run(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
@@ -810,39 +897,91 @@ class DocumentIngestionPipeline(
 
 ## 10. RAG 런타임 검색 흐름
 
+### 10-1. 3단계 검색 (Dense + Sparse Hybrid → Reranker → 컨텍스트 조립)
+
+순수 cosine 유사도만으로는 "테이블명/컬럼명이 비슷한 다른 도메인 청크"가 자주 끼어듭니다.
+SQL 생성 정확도의 다음 천장은 거의 항상 retrieval 품질이므로, 다음 3단계를 적용합니다.
+
+```
+사용자 질문
+  │
+  ▼ ① 쿼리 임베딩 (nomic-embed-text, "search_query:" prefix)
+  │
+  ├──▶ Dense 검색  (ChromaDB cosine, 타입별 topK=10) ──┐
+  │                                                     ├─▶ ② 후보 합집합 (최대 ~30개)
+  └──▶ Sparse 검색 (BM25, 테이블/컬럼명 키워드 매칭) ─┘
+                                                          │
+                                                          ▼ ③ Cross-Encoder 재순위
+                                                            (bge-reranker-base)
+                                                          │
+                                                          ▼ top-6 선택
+                                                          │
+                                                          ▼ 타입 비율 정합 (DDL≥3, 코드≥2, MD≥1)
+                                                          │
+                                                          ▼ 컨텍스트 조립 → 생성 모델 호출
+```
+
+| 단계 | 구성요소 | 책임 |
+|------|---------|------|
+| Dense | `ChromaDbClient.query()` | 의미적 유사도 |
+| Sparse | `BM25Index` (Lucene/SeaweedFS 등 in-process) | 정확한 식별자 매칭 |
+| Rerank | `RerankerClient` (Ollama/Triton로 호스팅하는 `bge-reranker-base`) | 질문-청크 정합도 재평가 |
+| Compose | `ContextAssembler` | 타입 비율·중복 제거·토큰 한계 적용 |
+
+### 10-2. 구현 예
+
 ```kotlin
-suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
-    // ① 질문을 벡터로 변환
-    val queryVector = ollamaClient.embed(naturalLanguage)
+@Service
+class LlmOrchestrationService(
+    private val ollamaClient: OllamaClient,
+    private val chromaDbClient: ChromaDbClient,
+    private val bm25Index: BM25Index,
+    private val reranker: RerankerClient,
+    private val promptBuilder: PromptBuilder
+) {
+    suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
+        // ① 쿼리 임베딩 (task prefix 필수, AGENTS §11-6)
+        val queryVector = ollamaClient.embed("search_query: $naturalLanguage")
 
-    // ② 타입별 가중 검색 (SQL 생성: DDL 우선)
-    val chunks = chromaDbClient.query(system.chromaCollection, queryVector, topK=3,
-                    typeFilter=listOf("sql_ddl")) +
-                 chromaDbClient.query(system.chromaCollection, queryVector, topK=2,
-                    typeFilter=listOf("source_code")) +
-                 chromaDbClient.query(system.chromaCollection, queryVector, topK=1,
-                    typeFilter=listOf("markdown"))
+        // ② Dense + Sparse 후보 수집 (병렬)
+        val denseDeferred  = coroutineScope { async {
+            chromaDbClient.query(system.chromaCollection, queryVector, topK = 10)
+        } }
+        val sparseDeferred = coroutineScope { async {
+            bm25Index.search(system.id, naturalLanguage, topK = 10)
+        } }
+        val candidates = (denseDeferred.await() + sparseDeferred.await())
+            .distinctBy { it.id }
 
-    // ③ 유사도 낮은 청크 제거 후 context 조립
-    val context = chunks.sortedByDescending { it.similarity }
-                        .joinToString("\n\n---\n\n") { it.text }
+        // ③ Cross-encoder reranker로 top-6 선별
+        val reranked = reranker.rerank(naturalLanguage, candidates, topK = 6)
 
-    // ④ 영문 프롬프트 + gpt-oss:20b 호출
-    return ollamaClient.generate("""
-        [SYSTEM]
-        You are an expert SQL generator for the "${system.name}" system.
-        Target DBMS: ${system.dbType}
-        Use ONLY the context below. Generate ONLY a valid SQL SELECT statement.
-        If not about data extraction, respond EXACTLY: "데이터 추출 요구 아님"
+        // ④ 타입 비율 정합 (DDL 우선) + 컨텍스트 조립
+        val context = ContextAssembler.assemble(
+            chunks = reranked,
+            ratios = mapOf("sql_ddl" to 3, "source_code" to 2, "markdown" to 1)
+        )
 
-        [CONTEXT — retrieved from knowledge base]
-        $context
-
-        [USER REQUEST]
-        $naturalLanguage
-    """.trimIndent())
+        // ⑤ 프롬프트 빌더로 외부화된 템플릿에 주입 (AGENTS §16)
+        val prompt = promptBuilder.buildSqlGenerationPrompt(
+            nl = naturalLanguage,
+            dbType = system.dbType.name,
+            systemName = system.name,
+            context = context
+        )
+        return ollamaClient.generate(prompt)
+    }
 }
 ```
+
+### 10-3. Reranker 호스팅 — 가벼운 모델 우선
+
+- 기본: `bge-reranker-base` (~278MB) — Ollama 컨테이너 동일 GPU에서 로딩
+- 대안: BAAI/`bge-reranker-v2-m3` (다국어 강함, ~1.5GB) — 한국어 질의 비중이 높으면 채택
+- 호출 지연: 6~30 후보에 대해 < 200ms 목표 (T4 기준)
+
+> **점진적 도입 전략:** Phase 3은 Dense만으로 출시, Phase 4 초입에 Hybrid + Reranker를 활성화합니다.
+> 둘 다 feature flag(`app.retrieval.hybrid.enabled`, `app.retrieval.rerank.enabled`)로 켜고 끕니다.
 
 ---
 
@@ -858,10 +997,13 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 └── models/
     ├── manifests/
     │   └── registry.ollama.ai/library/
-    │       ├── gpt-oss/          ← 모델 메타 정보 (deepseek-coder에서 변경)
-    │       └── nomic-embed-text/
+    │       ├── gpt-oss/          ← 생성 모델 (잠정, 벤치마크 후 확정 — §20-A)
+    │       ├── qwen2.5-coder/    ← 벤치마크 후보
+    │       ├── deepseek-coder/   ← 벤치마크 후보
+    │       ├── nomic-embed-text/ ← 임베딩 (768-dim)
+    │       └── bge-reranker-base/ ← Reranker (Phase 4)
     └── blobs/                    ← 실제 가중치 파일
-        ├── sha256-xxxx...        ← gpt-oss:20b (~11GB)
+        ├── sha256-xxxx...        ← gpt-oss:20b (~13GB)
         └── sha256-yyyy...        ← nomic-embed-text (~274MB)
 ```
 
@@ -869,8 +1011,13 @@ suspend fun generateSql(naturalLanguage: String, system: TargetSystem): String {
 
 ```bash
 # Ollama 컨테이너에서 실행
-docker compose exec ollama ollama pull gpt-oss:20b           # ~11GB, 30~60분 (deepseek-coder:6.7b에서 변경)
-docker compose exec ollama ollama pull nomic-embed-text       # ~274MB, 1~2분
+docker compose exec ollama ollama pull gpt-oss:20b              # ~13GB, 30~60분 (잠정 — §20-A 벤치마크로 확정)
+docker compose exec ollama ollama pull nomic-embed-text         # ~274MB, 1~2분
+# 벤치마크 후보 (§20-A):
+# docker compose exec ollama ollama pull qwen2.5-coder:7b       # ~4.7GB
+# docker compose exec ollama ollama pull deepseek-coder:6.7b    # ~3.8GB
+# Phase 4 reranker:
+# docker compose exec ollama ollama pull bge-reranker-base      # ~278MB (또는 HF/Triton)
 
 # 확인
 docker compose exec ollama ollama list
@@ -921,7 +1068,7 @@ services:
 
   # ── ChromaDB (벡터 DB) ───────────────────────────────────────────────
   chromadb:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.5.23   # 고정 버전 (latest 사용 금지 — 재현성/회귀 방지)
     container_name: nlp-chromadb
     restart: unless-stopped
     ports:
@@ -939,7 +1086,7 @@ services:
 
   # ── Ollama (LLM 런타임) ──────────────────────────────────────────────
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.5.11     # 고정 버전 (latest 사용 금지 — 재현성/회귀 방지)
     container_name: nlp-ollama
     restart: unless-stopped
     ports:
@@ -1168,16 +1315,21 @@ server {
 | D. 고성능 | `g5.xlarge` | 16GB | A10G 22GB | ~$830 | 13B 모델 |
 
 ```
-EBS gp3 250 GB
+EBS gp3 300 GB
 
 /                       30 GB  OS + Docker 이미지
 /data/
-  ├── ollama/           50 GB  LLM 모델 (deepseek ~3.8GB + nomic ~274MB + 여유)
+  ├── ollama/           60 GB  LLM 모델 (gpt-oss:20b ~13GB + nomic-embed-text ~274MB
+  │                              + 리랭커 ~1.5GB + 후보 모델 버퍼)
   ├── chromadb/         20 GB  벡터 DB 영구 데이터
   ├── mysql/            10 GB  플랫폼 메타 DB
-  ├── systems/         130 GB  시스템별 docs/ddl/sourcetree
+  ├── redis/             5 GB  세션 저장소 (AOF 사용 시 여유)
+  ├── systems/         150 GB  시스템별 docs/ddl/sourcetree
   └── results/          10 GB  생성된 Excel/HTML (2일 TTL)
 ```
+
+> 모델 후보를 교체할 때 (`qwen2.5-coder:7b` ~4.7GB, `deepseek-coder:6.7b` ~3.8GB 등)
+> 동시 보관을 고려해 `/data/ollama`는 넉넉히 60GB로 잡습니다.
 
 ---
 
@@ -1201,7 +1353,7 @@ Client (Browser)  ─── HTTPS/WSS ───▶  Nginx :443 (호스트)
                                │  /data/results  → nlp-app (마운트)         │
                                └───────────────────────────────────────────┘
 
-분析 대상 시스템 DB:
+분석 대상 시스템 DB:
   → DynamicDataSourceFactory → 런타임 JDBC 연결
   → Docker 네트워크 외부 (운영 서버 DB에 직접 연결)
   → EXPLAIN 검증 + SELECT 실행 모두 동일 PROD DB
@@ -1226,7 +1378,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
     // 플랫폼 메타 DB
     runtimeOnly("com.mysql:mysql-connector-j")
-    // 분析 대상 시스템 DB (다중 DBMS)
+    // 분석 대상 시스템 DB (다중 DBMS)
     runtimeOnly("org.mariadb.jdbc:mariadb-java-client")
     runtimeOnly("org.postgresql:postgresql")
     runtimeOnly("com.oracle.database.jdbc:ojdbc11")
@@ -1246,19 +1398,21 @@ dependencies {
 ## 16. 프롬프트 언어 전략
 
 **프롬프트는 영어로, 거절 응답은 한국어로 명시 지시합니다.**
+SQL 특화 모델·코드 학습 데이터가 압도적으로 영어이므로, 영어 시스템 프롬프트가 SQL 품질에 유리합니다.
+모든 프롬프트는 `src/main/resources/prompts/`의 `.md` 템플릿으로 외부화합니다 (AGENTS §16 참조).
 
 ```
 [SYSTEM - English]
-You are an expert SQL generator for the "{system.name}" system.
-Target DBMS: {system.dbType}
+You are an expert SQL generator for the "{{system_name}}" system.
+Target DBMS: {{db_type}}
 Use ONLY the context below. Generate ONLY a valid SQL SELECT statement.
 If not about data extraction, respond EXACTLY: "데이터 추출 요구 아님"
 
 [CONTEXT — retrieved from knowledge base]
-{DDL 3개 + 소스코드 2개 + Markdown 1개}
+{{context}}    ← DDL ≥3 + 소스코드 ≥2 + Markdown ≥1 (reranker 통과분)
 
 [USER REQUEST]
-{사용자 자연어 입력}
+{{natural_language}}
 ```
 
 ---
@@ -1347,17 +1501,25 @@ Git:      POST /admin/systems/{id}/git/sync
 
 ## 19. 비기능 요건 및 한계
 
-| 항목 | GPU 인스턴스 기준 |
-|------|:----------------:|
-| LLM SQL 생성 | 5~15초 |
-| EXPLAIN 검증 | < 500ms |
-| ChromaDB 검색 | < 25ms |
-| Excel 생성 (10,000행) | 1~3초 |
-| 임베딩 (1,000청크) | ~50초 |
-| Git clone (대형 레포) | 수분 (비동기) |
+| 항목 | T4 16GB 기준 | A10G 22GB 기준 |
+|------|:------------:|:--------------:|
+| LLM SQL 생성 (gpt-oss:20b) | 8~20초 | 4~10초 |
+| LLM SQL 생성 (qwen2.5-coder:7b) | 2~5초 | 1~3초 |
+| EXPLAIN 검증 | < 500ms | < 500ms |
+| Dense 검색 (ChromaDB) | < 25ms | < 25ms |
+| Hybrid (Dense+BM25) 검색 | < 60ms | < 60ms |
+| Reranker (bge-reranker-base, 후보 30개) | < 200ms | < 80ms |
+| Excel 생성 (10,000행) | 1~3초 | 1~3초 |
+| 임베딩 (1,000청크, batch=64) | ~10초 | ~6초 |
+| Git clone (대형 레포) | 수분 (비동기) | 수분 (비동기) |
+
+> 임베딩 시간이 이전 ~50초에서 ~10초로 단축된 근거: Ollama `/api/embed` 진짜 배치 호출 + batch=64.
 
 **알려진 한계:**
-Oracle/MSSQL EXPLAIN 파싱은 MySQL/PostgreSQL 대비 복잡합니다. Phase 5에서 단계적으로 추가를 권장합니다.
+- Oracle/MSSQL EXPLAIN 파싱은 MySQL/PostgreSQL 대비 복잡합니다. Phase 5에서 단계적으로 추가.
+- `gpt-oss:20b`는 SQL 특화 모델이 아닙니다. 정확도가 부족하면 Phase 2 말 벤치마크(§20-A)로
+  `qwen2.5-coder:7b` 또는 `deepseek-coder:6.7b`로 전환을 고려합니다.
+- Cross-encoder reranker는 GPU 메모리를 추가 점유합니다 (T4에서 생성 모델과 공유 시 ~1.5GB 여유 필요).
 
 ---
 
@@ -1370,25 +1532,37 @@ Phase 1 — 인프라 + 도메인 기반 (3주)
   ├── 세션 기반 인증 (로그인/로그아웃/Heartbeat API)
   ├── TargetSystem + SystemFile 엔티티
   ├── DynamicDataSourceFactory + TokenEncryptor
+  ├── ApplicationCoroutineScope 빈 (§9-7-a)
   └── SystemDirectoryManager + ChromaDB 컬렉션 관리
 
 Phase 2 — 임베딩 파이프라인 (2주)
   ├── JobHistory 엔티티 + JobHistoryService
-  ├── OllamaClient (embed + generate)
-  ├── ChromaDbClient (upsert + query)
+  ├── OllamaClient (OllamaProperties 주입, /api/embed 배치)
+  ├── ChromaDbClient (upsert + query, 768차원)
   ├── MarkdownChunker + SqlDdlChunker + SourceCodeChunker
   ├── DocumentIngestionPipeline (FULL/INCREMENTAL/SINGLE)
   └── Git Sync API + 자동 임베딩 트리거
 
+[Phase 2 종료 직전] A. 생성 모델 벤치마크 게이트 (3~5일)
+  ├── 후보: gpt-oss:20b vs qwen2.5-coder:7b vs deepseek-coder:6.7b
+  ├── 평가셋: 사내 자연어-SQL 100쌍 (시스템 3종 이상 커버)
+  ├── 지표: (1) SQL Exact-match (2) Execution-match (3) p50/p95 latency
+  │         (4) GPU 메모리 (5) 4-bit quant 시 품질 저하율
+  └── 합격선: latency p95 ≤ 8초 (T4) 또는 ≤ 4초 (A10G) AND Exec-match ≥ 70%
+            → 가장 가벼우면서 합격선을 넘는 모델을 application.yaml에 고정
+
 Phase 3 — SQL 검증 + 추출 + 게시판 (3주)
   ├── SqlValidator + ExplainAnalyzer (MySQL/MariaDB/PostgreSQL)
-  ├── LlmOrchestrationService (RAG + SQL 생성 + 작명)
-  ├── NLQueryService 비동기 코루틴
+  ├── LlmOrchestrationService (Dense RAG + SQL 생성 + 작명)
+  ├── NLQueryService 비동기 코루틴 (ApplicationCoroutineScope 사용)
   ├── Apache POI Excel + QueryResult 게시판
   ├── WebSocket + ResultFileCleanupScheduler (2일 TTL)
   └── Slack 파일 첨부 전송
 
-Phase 4 — 시각화 + 관리자 UI (2주)
+Phase 4 — Hybrid Retrieval + 시각화 + 관리자 UI (3주)
+  ├── BM25Index (Lucene in-process) + Hybrid 후보 통합
+  ├── RerankerClient (bge-reranker-base) + ContextAssembler
+  ├── 평가셋 회귀 테스트 (Phase 2-A 셋 재사용, 정확도 향상 입증)
   ├── VisualizationService (2단계 LLM)
   ├── HTML 서빙 API + iframe 렌더링
   └── 관리자 UI 완성 (Mustache)

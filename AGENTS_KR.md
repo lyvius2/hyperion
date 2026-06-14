@@ -403,7 +403,7 @@ LLM 모델명은 소스 코드에 하드코딩하지 않습니다. 반드시 `ap
 data class OllamaProperties(
     val baseUrl: String,
     val embeddingModel: String = "nomic-embed-text",
-    val generationModel: String = "gpt-oss:20b"   // 초기에는 deepseek-coder:6.7b 검토
+    val generationModel: String = "gpt-oss:20b"   // 잠정; Phase 2 말 벤치마크 게이트로 확정
 )
 
 // OllamaClient에서 사용
@@ -511,12 +511,36 @@ val sql            = sqlDeferred.await()
 
 ### 비동기 트리거 (Controller → 백그라운드)
 
+`GlobalScope` 대신 애플리케이션 스코프 빈인 `ApplicationCoroutineScope`를 주입받아 사용합니다.
+`GlobalScope`는 JVM 종료 시 cancel을 보장하지 않아, 컨테이너 재기동 시
+"좀비" 작업(JobHistory가 `RUNNING`인 채로 남음, ChromaDB 부분 upsert 등)을 남깁니다.
+
 ```kotlin
-// ✅ 권장: 비동기 실행, 즉시 202 반환
-@OptIn(DelicateCoroutinesApi::class)
-fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
-    GlobalScope.launch(Dispatchers.IO) { run(system, mode, triggeredBy) }
+// ✅ 필수: 라이프사이클이 관리되는 스코프 주입
+@Component
+class DocumentIngestionPipeline(
+    private val appScope: ApplicationCoroutineScope,
+    // ... 다른 의존성
+) {
+    fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
+        appScope.launch { run(system, mode, triggeredBy) }   // 즉시 202 반환
+    }
 }
+```
+
+```kotlin
+// ✅ 빈 정의 (전체 코드는 ARCHITECTURE_DESIGN §9-7-a 참조)
+@Configuration
+class CoroutineConfig {
+    @Bean(destroyMethod = "close")
+    fun applicationCoroutineScope(): ApplicationCoroutineScope = ApplicationCoroutineScope()
+}
+```
+
+```kotlin
+// ❌ 금지: GlobalScope는 종료 시점에 누수됨
+@OptIn(DelicateCoroutinesApi::class)
+GlobalScope.launch(Dispatchers.IO) { ... }
 ```
 
 ### 금지
@@ -869,6 +893,36 @@ val queryEmbedding = ollamaClient.embed(naturalLanguage)
 
 > **이유:** `nomic-embed-text`는 문서와 쿼리에 따라 내부 표현을 다르게 생성합니다. prefix를 생략하면 검색 정확도가 크게 저하됩니다.
 
+### 11-7. 임베딩 차원 및 배치
+
+- `nomic-embed-text` v1.5는 **768차원** 벡터를 반환합니다. ChromaDB 컬렉션은 반드시
+  `dimension=768`로 생성합니다. (Matryoshka 256/512/768 모드는 설정 가능하나 현재 파이프라인의
+  기본값과 가정은 768입니다.)
+- 대량 임베딩에는 Ollama `/api/embed` 엔드포인트(`input: List<String>`)를 사용합니다.
+  구 `/api/embeddings`는 단건 입력만 지원하므로 인제스천에서는 사용하지 않습니다.
+- 배치 크기는 `app.ollama.embedding-batch-size`(기본 64)로 주입하며, 코드에 하드코딩하지 않습니다.
+
+```kotlin
+// ✅ 필수: /api/embed로 진짜 배치
+webClient.post().uri("${props.baseUrl}/api/embed")
+    .bodyValue(mapOf("model" to props.embeddingModel, "input" to batch))
+    .retrieve().awaitBody<EmbedResponse>()
+
+// ❌ 금지: /api/embeddings를 "가짜 배치" 루프로 직렬 호출
+texts.chunked(10).flatMap { it.map { single -> embedSingle(single) } }
+```
+
+### 11-8. Hybrid Retrieval 및 Reranker (Phase 4 이후)
+
+`app.retrieval.hybrid.enabled=true`일 때 RAG retrieval은 다음 단계를 **모두** 거쳐야 합니다.
+
+1. Dense 검색 — `ChromaDbClient.query(...)` (의미적 유사도)
+2. Sparse 검색 — `BM25Index.search(...)` (식별자/키워드 정확 매칭)
+3. Cross-encoder rerank — `RerankerClient.rerank(question, candidates, topK)`
+
+플래그가 켜진 상태에서 단계를 생략하는 것은 금지합니다. 전체 설계는 ARCHITECTURE_DESIGN §10 참조.
+플래그가 꺼진 경로(Phase 3 출시)는 Dense 단독으로 동작합니다.
+
 ---
 
 ## 12. SQL 검증 규칙
@@ -1088,8 +1142,8 @@ A. `DbType` enum에 새 항목을 추가하고, `ExplainAnalyzer`에 해당 DBMS
 **Q. 임베딩 파이프라인이 실패하면 어떻게 됩니까?**  
 A. `JobHistory`에 `FAILED` 상태와 스택 트레이스가 저장됩니다. `TargetSystem.ingestionStatus`가 `FAILED`로 업데이트됩니다. 관리자 API `GET /admin/jobs/{id}`로 원인을 확인할 수 있습니다.
 
-**Q. `nomic-embed-text`와 `gpt-oss:20b`의 역할 차이는 무엇입니까?**  
-A. `nomic-embed-text`는 텍스트를 384차원 벡터로 변환하는 임베딩 전용 모델입니다. SQL을 이해하거나 생성하지 않습니다. `gpt-oss:20b`(초기에는 `deepseek-coder:6.7b` 사용을 검토했으나 성능상 이유로 변경)는 프롬프트 context를 읽고 SQL을 생성하는 언어 모델입니다.
+**Q. 임베딩 모델과 생성 모델의 역할 차이는 무엇입니까?**
+A. `nomic-embed-text` v1.5는 텍스트를 **768차원** 벡터로 변환하는 임베딩 전용 모델입니다. SQL을 이해하거나 생성하지 않습니다. 생성 모델(현재 잠정 `gpt-oss:20b`, Phase 2 말 벤치마크 게이트로 확정 — 후보: `qwen2.5-coder:7b`, `deepseek-coder:6.7b`)은 프롬프트 context를 읽고 SQL을 그 자리에서 생성하는 언어 모델입니다.
 
 ---
 

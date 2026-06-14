@@ -405,7 +405,7 @@ LLM model names must never be hardcoded in source code. They must be managed via
 data class OllamaProperties(
     val baseUrl: String,
     val embeddingModel: String = "nomic-embed-text",
-    val generationModel: String = "gpt-oss:20b"   // initially considered: deepseek-coder:6.7b
+    val generationModel: String = "gpt-oss:20b"   // tentative; finalized via Phase 2 benchmark gate
 )
 
 // Usage in OllamaClient
@@ -513,12 +513,37 @@ val sql            = sqlDeferred.await()
 
 ### Async Trigger (Controller → Background)
 
+Use the application-scoped `ApplicationCoroutineScope` bean instead of `GlobalScope`.
+`GlobalScope` is forbidden because it does **not** guarantee cancellation at JVM shutdown,
+which leaves "zombie" jobs (e.g. JobHistory rows stuck in `RUNNING`, partial ChromaDB
+upserts) on container restart.
+
 ```kotlin
-// ✅ Recommended: Async execution, return 202 immediately
-@OptIn(DelicateCoroutinesApi::class)
-fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
-    GlobalScope.launch(Dispatchers.IO) { run(system, mode, triggeredBy) }
+// ✅ Required: Inject the lifecycle-managed scope
+@Component
+class DocumentIngestionPipeline(
+    private val appScope: ApplicationCoroutineScope,
+    // ... other dependencies
+) {
+    fun triggerAsync(system: TargetSystem, mode: IngestionMode, triggeredBy: Member?) {
+        appScope.launch { run(system, mode, triggeredBy) }   // returns 202 immediately
+    }
 }
+```
+
+```kotlin
+// ✅ The bean (see ARCHITECTURE_DESIGN §9-7-a for full source)
+@Configuration
+class CoroutineConfig {
+    @Bean(destroyMethod = "close")
+    fun applicationCoroutineScope(): ApplicationCoroutineScope = ApplicationCoroutineScope()
+}
+```
+
+```kotlin
+// ❌ Forbidden: GlobalScope leaks across shutdown
+@OptIn(DelicateCoroutinesApi::class)
+GlobalScope.launch(Dispatchers.IO) { ... }
 ```
 
 ### Prohibited
@@ -871,6 +896,38 @@ val queryEmbedding = ollamaClient.embed(naturalLanguage)
 
 > **Why:** `nomic-embed-text` uses different internal representations depending on whether the text is a document or a query. Omitting the prefix degrades retrieval accuracy.
 
+### 11-7. Embedding Dimensions and Batching
+
+- `nomic-embed-text` v1.5 returns **768-dimensional** vectors. ChromaDB collections must be
+  created with `dimension=768`. (The Matryoshka 256/512/768 modes are configurable but the
+  default and current pipeline assumption is 768.)
+- Use Ollama's `/api/embed` endpoint (input: `List<String>`) for true batch embedding.
+  The older `/api/embeddings` endpoint accepts only a single input — do not use it for
+  bulk ingestion.
+- Batch size is configurable via `app.ollama.embedding-batch-size` (default 64). Do not
+  hardcode the chunked size.
+
+```kotlin
+// ✅ Required: true batch via /api/embed
+webClient.post().uri("${props.baseUrl}/api/embed")
+    .bodyValue(mapOf("model" to props.embeddingModel, "input" to batch))
+    .retrieve().awaitBody<EmbedResponse>()
+
+// ❌ Prohibited: serial calls to /api/embeddings inside a "fake" batch loop
+texts.chunked(10).flatMap { it.map { single -> embedSingle(single) } }
+```
+
+### 11-8. Hybrid Retrieval and Reranker (Phase 4+)
+
+When `app.retrieval.hybrid.enabled=true`, RAG retrieval **must** combine the following stages:
+
+1. Dense search — `ChromaDbClient.query(...)` (semantic similarity)
+2. Sparse search — `BM25Index.search(...)` (exact identifier / keyword match)
+3. Cross-encoder rerank — `RerankerClient.rerank(question, candidates, topK)`
+
+Skipping any stage when the flag is on is forbidden. See ARCHITECTURE_DESIGN §10 for the
+full design. The flag-off path (Phase 3 ship) falls back to Dense only.
+
 ---
 
 ## 12. SQL Validation Rules
@@ -1090,8 +1147,8 @@ A. Add a new entry to the `DbType` enum, implement an EXPLAIN parser for that DB
 **Q. What happens if the embedding pipeline fails?**  
 A. The `JobHistory` record is updated to `FAILED` status with the full stack trace saved. `TargetSystem.ingestionStatus` is updated to `FAILED`. The cause can be inspected via the admin API `GET /admin/jobs/{id}`.
 
-**Q. What is the difference in roles between `nomic-embed-text` and `gpt-oss:20b`?**  
-A. `nomic-embed-text` is an embedding-only model that converts text into 384-dimensional vectors. It does not understand or generate SQL. `gpt-oss:20b` (formerly considered: `deepseek-coder:6.7b`) is a language model that reads the prompt context and generates SQL.
+**Q. What is the difference in roles between the embedding model and the generation model?**
+A. `nomic-embed-text` v1.5 is an embedding-only model that converts text into **768-dimensional** vectors. It does not understand or generate SQL. The generation model (currently `gpt-oss:20b`, finalised after the Phase 2-end benchmark gate — candidates include `qwen2.5-coder:7b`, `deepseek-coder:6.7b`) reads the prompt context and generates SQL on the spot.
 
 ---
 
