@@ -1,6 +1,61 @@
 server:
   port: 5542
+  servlet:
+    session:
+      cookie:
+        name: JSESSIONID
+        http-only: true
+        same-site: lax
+        # secure: true ← Enable in production (requires HTTPS)
 
 spring:
   application:
     name: hyperion
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
+  main:
+    web-application-type: servlet
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: Asia/Seoul
+  session:
+    timeout: 15m
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    root: INFO
+    banghak.data.platform.hyperion: DEBUG
+
+hyperion:
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    inference-model: ${OLLAMA_INFERENCE_MODEL:gpt-oss:20b}
+    embedding-model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
+    embedding-dimension: 768
+  chromadb:
+    base-url: ${CHROMADB_BASE_URL:http://localhost:8000}
+  llm:
+    max-concurrent: 1
+    queue-capacity: 32
+    queue-timeout: 60s
+  storage:
+    systems-root: ${SYSTEMS_ROOT:/data/systems}
+    results-root: ${RESULTS_ROOT:/data/results}

@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:hyperion;MODE=MySQL;DB_CLOSE_DELAY=-1;NON_KEYWORDS=USER
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  flyway:
+    enabled: false
+  session:
+    store-type: none
+
+hyperion:
+  storage:
+    systems-root: ./.local/systems
+    results-root: ./.local/results
+
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
