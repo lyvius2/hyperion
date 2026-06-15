@@ -182,7 +182,7 @@
 │  │  - Result rendering (Excel button / iframe / Markdown)    │  │
 │  ├───────────────────────────────────────────────────────────┤  │
 │  │  INPUT CONTROL  (fixed at bottom)                         │  │
-│  │  [Select system ▼]  [□ Visualize] [□ Analyze Result]     │  │
+│  │  [LLM ▼] [Select system ▼]  [□ Visualize] [□ Analyze]    │  │
 │  │  ─────────────────────────────────────────────────────    │  │
 │  │  textarea                                           [↑]   │  │
 │  └───────────────────────────────────────────────────────────┘  │
@@ -280,19 +280,19 @@
 ### 5-1. Initial State (No Chat History)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                                                              │
-│                                                              │
-│              What data would you like to explore?            │
-│                                                              │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │  [Select a system ▼]   [□ Visualize] [□ Analyze Result]│  │
-│  │  ─────────────────────────────────────────────────     │  │
-│  │  Type your data request here...                        │  │
-│  │  (Shift+Enter for new line)                       [↑]  │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                                                                    │
+│                                                                    │
+│                What data would you like to explore?                │
+│                                                                    │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  [Local ▼]  [Select a system ▼]  [□ Visualize] [□ Analyze]   │  │
+│  │  ────────────────────────────────────────────────────────    │  │
+│  │  Type your data request here...                              │  │
+│  │  (Shift+Enter for new line)                             [↑]  │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 The centered placeholder `"What data would you like to explore?"` disappears once chat history exists.
@@ -344,25 +344,42 @@ The centered placeholder `"What data would you like to explore?"` disappears onc
 ### 6-1. Full Structure
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  [Select a system ▼]            [□ Visualize] [□ Analyze Result] │
-├──────────────────────────────────────────────────────────────────┤
-│  Type your data request here...                                  │
-│  (multi-line input supported)                                    │
-│                                                             [↑]  │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  [Local ▼]  [Select a system ▼]      [□ Visualize] [□ Analyze]      │
+├─────────────────────────────────────────────────────────────────────┤
+│  Type your data request here...                                     │
+│  (multi-line input supported)                                       │
+│                                                                [↑]  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 6-2. System Selector Dropdown
+### 6-2. LLM Selector Dropdown
 
 | Item | Detail |
 |------|--------|
-| Position | Top-left of input control |
+| Position | Top of the input control, **to the left of the system dropdown** |
+| Option labels | `Local`, `Anthropic (Cloud)` |
+| Option values sent to API | `ollama`, `anthropic` (request payload `provider` field) |
+| Default | Driven by `defaultProvider` from `GET /api/llm/providers` (typically `Local`) |
+| Data source | `GET /api/llm/providers` — only providers listed in `availableProviders` are shown. If `ANTHROPIC_API_KEY` is unset in production, `anthropic` is omitted and the option is auto-hidden |
+| Behavior | The current selection is included in every request payload. Users can freely switch on a per-message basis (not session-scoped) |
+| Visual cue | A small single-tone SVG icon next to the label (Local: monitor; Anthropic: cloud). Icon color matches `--color-text-secondary` |
+| Disabled when | Request in flight, viewing history |
+
+> **Never hardcode the UI label ↔ API value mapping.** `GET /api/llm/providers` must return label info, e.g. `{provider: "ollama", displayName: "Local"}` (update API_SPECIFICATION accordingly).
+
+> **A/B comparison flow.** Sending the same question against the same system twice with only the LLM toggled produces two sequential results in the chat area. Each result message carries a small `via Local` / `via Anthropic` caption so the user can tell which LLM generated it.
+
+### 6-3. System Selector Dropdown
+
+| Item | Detail |
+|------|--------|
+| Position | Top of the input control, **to the right of the LLM dropdown** |
 | Default | `Select a system...` (placeholder) |
 | Data source | `GET /api/systems` — shows only systems with `ingestionStatus = COMPLETED` |
 | Validation | If submitted without selection, show error toast: `"Please select a system first."` |
 
-### 6-3. Checkbox Options
+### 6-4. Checkbox Options
 
 | Checkbox | Label | Behavior |
 |---------|-------|----------|
@@ -371,7 +388,7 @@ The centered placeholder `"What data would you like to explore?"` disappears onc
 
 Both checkboxes are independently selectable and can both be checked simultaneously.
 
-### 6-4. Text Input Area
+### 6-5. Text Input Area
 
 | Item | Detail |
 |------|--------|
@@ -384,7 +401,7 @@ Both checkboxes are independently selectable and can both be checked simultaneou
 | Placeholder | `Type your data request here... (Shift+Enter for new line)` |
 | Disabled when | Waiting for result (after selecting No), viewing history |
 
-### 6-5. Send Button States
+### 6-6. Send Button States
 
 | State | Display | Clickable |
 |-------|---------|:---------:|
