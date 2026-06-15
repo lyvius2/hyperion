@@ -45,17 +45,38 @@ logging:
     banghak.data.platform.hyperion: DEBUG
 
 hyperion:
-  ollama:
-    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
-    inference-model: ${OLLAMA_INFERENCE_MODEL:gpt-oss:20b}
-    embedding-model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
-    embedding-dimension: 768
+  llm:
+    # UI picks the inference provider per request; falls back to default-provider when omitted.
+    # Embedding always uses Ollama. If anthropic.api-key is empty, Anthropic is auto-disabled
+    # (UI hides the option, API rejects provider=anthropic).
+    default-provider: ${HYPERION_DEFAULT_PROVIDER:ollama}
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      inference-model: ${OLLAMA_INFERENCE_MODEL:gpt-oss:20b}
+      embedding-model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
+      embedding-dimension: 768
+      embedding-batch-size: 64
+      temperature: 0.1
+      max-tokens: 1024
+      queue:
+        max-concurrent: 1
+        queue-capacity: 32
+        queue-timeout: 60s
+        execution-timeout: 180s
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+      inference-model: ${ANTHROPIC_INFERENCE_MODEL:claude-opus-4-7}
+      max-tokens: 4096
+      temperature: 0.1
+      request-timeout: 60s
+      queue:
+        max-concurrent: 10
+        queue-capacity: 100
+        queue-timeout: 60s
+        execution-timeout: 180s
   chromadb:
     base-url: ${CHROMADB_BASE_URL:http://localhost:8000}
-  llm:
-    max-concurrent: 1
-    queue-capacity: 32
-    queue-timeout: 60s
   storage:
     systems-root: ${SYSTEMS_ROOT:/data/systems}
     results-root: ${RESULTS_ROOT:/data/results}

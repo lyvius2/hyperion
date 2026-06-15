@@ -651,79 +651,374 @@ class SourceCodeChunker(
 }
 ```
 
-### 9-5. OllamaClient — 임베딩 + 추론
+### 9-5. LLM 클라이언트 — 임베딩 + 추론 (런타임 Provider 라우팅)
 
-**모델명은 `OllamaProperties`로 주입**하며, Ollama의 신규 `/api/embed` 배치 엔드포인트를 사용해
-진짜 배치 호출을 수행합니다. (구 `/api/embeddings`는 1개 입력만 받습니다.)
+**임베딩은 항상 local Ollama로 고정**하고, **추론(SQL 생성·분석·작명)은 매 요청마다 UI에서
+Ollama / Anthropic 중 선택**할 수 있도록 두 책임을 인터페이스로 분리합니다. RAG 임베딩은
+비용 0·데이터 외부 유출 없음·배치 친화라는 이점이 크고, 추론은 모델 품질에 따라 결과가 크게
+갈리므로 같은 데이터셋을 두 provider로 A/B 비교할 수 있게 합니다.
+
+> **시작 시점이 아닌 요청 시점 결정.** 두 chat 클라이언트와 두 limiter는 항상 컨테이너에
+> 공존하며, `ChatModelRouter`가 요청 페이로드의 `provider` 필드로 라우팅합니다.
+> `provider`가 비어 있으면 `hyperion.llm.default-provider` (기본 `ollama`)를 사용합니다.
+> `anthropic.api-key`가 비어 있으면 Anthropic은 자동 비활성화 — API는 `provider=anthropic`
+> 요청을 거절하고, UI는 옵션을 숨깁니다.
+
+#### 9-5-1. 인터페이스
 
 ```kotlin
-@ConfigurationProperties(prefix = "app.ollama")
+/** RAG 인덱싱·쿼리 변환에 쓰이는 임베딩 클라이언트 (Ollama 단일 구현). */
+interface EmbeddingClient {
+    suspend fun embed(text: String): FloatArray
+    suspend fun embedBatch(texts: List<String>): List<FloatArray>
+}
+
+/** SQL 생성·분석·작명에 쓰이는 추론 클라이언트. provider별 구현이 다르나 호출부는 동일. */
+interface ChatModelClient {
+    /** Provider 식별자. `LlmProperties.Provider`와 1:1 매칭. */
+    val provider: LlmProperties.Provider
+
+    /** 현재 환경에서 호출 가능한지 (예: Anthropic은 api-key가 비어 있으면 false). */
+    val isAvailable: Boolean
+
+    /**
+     * 단일 응답을 반환. 사용된 input/output token 수를 함께 돌려줘
+     * 비용·사용량 추적이 가능하도록 합니다.
+     */
+    suspend fun generate(prompt: String, temperature: Double? = null): ChatResult
+}
+
+data class ChatResult(
+    val text: String,
+    val inputTokens: Int,
+    val outputTokens: Int
+)
+```
+
+> **모델명은 항상 properties로 주입**하며, 클라이언트 구현 내부에서 문자열 리터럴로 박지 않습니다.
+> (AGENTS.md §5-7)
+
+#### 9-5-2. Properties
+
+```kotlin
+@ConfigurationProperties(prefix = "hyperion.llm")
+data class LlmProperties(
+    /** UI가 provider를 명시하지 않은 경우의 기본값. 임베딩은 항상 ollama. */
+    val defaultProvider: Provider = Provider.OLLAMA,
+    val ollama: OllamaProperties,
+    val anthropic: AnthropicProperties
+) {
+    enum class Provider { OLLAMA, ANTHROPIC }
+}
+
 data class OllamaProperties(
     val baseUrl: String,
-    val embeddingModel: String = "nomic-embed-text",
-    val generationModel: String = "gpt-oss:20b",
-    val embeddingBatchSize: Int = 64,         // 한 호출에 묶을 입력 개수
-    val generationTemperature: Double = 0.1,
-    val generationMaxTokens: Int = 1024
+    val inferenceModel: String,
+    val embeddingModel: String,
+    val embeddingDimension: Int,
+    val embeddingBatchSize: Int = 64,
+    val temperature: Double = 0.1,
+    val maxTokens: Int = 1024,
+    val queue: QueueProperties = QueueProperties(maxConcurrent = 1)
 )
 
-@Component
-class OllamaClient(
-    private val props: OllamaProperties,
-    private val webClient: WebClient
-) {
-    // ── 단건 임베딩 (런타임 쿼리 변환용) ─────────────────────────
-    suspend fun embed(text: String): FloatArray = embedBatch(listOf(text)).first()
+data class AnthropicProperties(
+    val apiKey: String,
+    val baseUrl: String = "https://api.anthropic.com",
+    val inferenceModel: String,                    // 예: claude-opus-4-7
+    val maxTokens: Int = 4096,
+    val temperature: Double = 0.1,
+    val requestTimeout: Duration = Duration.ofSeconds(60),
+    val queue: QueueProperties = QueueProperties(maxConcurrent = 10)
+)
 
-    // ── 진짜 배치 임베딩 (`/api/embed`, input: List<String>) ────
-    suspend fun embedBatch(texts: List<String>): List<FloatArray> =
-        texts.chunked(props.embeddingBatchSize).flatMap { batch ->
-            val res = webClient.post().uri("${props.baseUrl}/api/embed")
+data class QueueProperties(
+    val maxConcurrent: Int,
+    val queueCapacity: Int = 32,
+    val queueTimeout: Duration = Duration.ofSeconds(60),
+    val executionTimeout: Duration = Duration.ofSeconds(180)
+)
+```
+
+#### 9-5-3. OllamaEmbeddingClient — 임베딩 전용 (항상 활성)
+
+`/api/embed` 배치 엔드포인트로 진짜 배치 호출. (구 `/api/embeddings`는 1개만 받음)
+
+```kotlin
+@Component
+class OllamaEmbeddingClient(
+    private val props: LlmProperties,
+    private val webClient: WebClient
+) : EmbeddingClient {
+
+    override suspend fun embed(text: String): FloatArray =
+        embedBatch(listOf(text)).first()
+
+    override suspend fun embedBatch(texts: List<String>): List<FloatArray> =
+        texts.chunked(props.ollama.embeddingBatchSize).flatMap { batch ->
+            val res = webClient.post().uri("${props.ollama.baseUrl}/api/embed")
                 .bodyValue(mapOf(
-                    "model" to props.embeddingModel,
+                    "model" to props.ollama.embeddingModel,
                     "input" to batch
                 ))
                 .retrieve().awaitBody<EmbedResponse>()
             res.embeddings.map { it.toFloatArray() }
         }
 
-    // ── SQL/HTML 생성 (런타임) ──────────────────────────────────
-    suspend fun generate(
-        prompt: String,
-        temperature: Double = props.generationTemperature
-    ): String {
-        val res = webClient.post().uri("${props.baseUrl}/api/generate")
-            .bodyValue(mapOf(
-                "model"   to props.generationModel,
-                "prompt"  to prompt,
-                "stream"  to false,
-                "options" to mapOf(
-                    "temperature" to temperature,
-                    "num_predict" to props.generationMaxTokens
-                )
-            ))
-            .retrieve().awaitBody<GenerateResponse>()
-        return res.response.trim()
-    }
-
-    data class EmbedResponse(val embeddings: List<List<Float>>)
-    data class GenerateResponse(val response: String)
+    private data class EmbedResponse(val embeddings: List<List<Float>>)
 }
 ```
 
-```yaml
-# application.yaml — 모델 교체 시 코드 수정 없이 yaml만 변경
-app:
-  ollama:
-    base-url: http://ollama:11434
-    embedding-model: nomic-embed-text          # 768-dim
-    generation-model: gpt-oss:20b              # 벤치마크 후 qwen2.5-coder:7b 등으로 교체 가능
-    embedding-batch-size: 64
-    generation-temperature: 0.1
-    generation-max-tokens: 1024
+#### 9-5-4. OllamaChatClient — Ollama 추론
+
+두 chat 클라이언트는 항상 컨테이너에 존재합니다. `@ConditionalOnProperty`로 분기하지 않습니다.
+
+```kotlin
+@Component
+class OllamaChatClient(
+    private val props: LlmProperties,
+    private val webClient: WebClient
+) : ChatModelClient {
+
+    override val provider = LlmProperties.Provider.OLLAMA
+    override val isAvailable: Boolean = true        // local 컨테이너 상존 가정 (health check은 §22)
+
+    override suspend fun generate(prompt: String, temperature: Double?): ChatResult {
+        val res = webClient.post().uri("${props.ollama.baseUrl}/api/generate")
+            .bodyValue(mapOf(
+                "model"   to props.ollama.inferenceModel,
+                "prompt"  to prompt,
+                "stream"  to false,
+                "options" to mapOf(
+                    "temperature" to (temperature ?: props.ollama.temperature),
+                    "num_predict" to props.ollama.maxTokens
+                )
+            ))
+            .retrieve().awaitBody<GenerateResponse>()
+        return ChatResult(
+            text = res.response.trim(),
+            inputTokens = res.promptEvalCount ?: 0,
+            outputTokens = res.evalCount ?: 0
+        )
+    }
+
+    private data class GenerateResponse(
+        val response: String,
+        @JsonProperty("prompt_eval_count") val promptEvalCount: Int?,
+        @JsonProperty("eval_count") val evalCount: Int?
+    )
+}
 ```
 
-> **금지:** `OllamaClient` 내부에서 모델명을 문자열 리터럴로 작성하는 것. AGENTS.md §5-7 참조.
+#### 9-5-5. AnthropicChatClient — Cloud Claude 추론
+
+**Sync `java.net.http.HttpClient` + Virtual Thread Dispatcher** 조합을 씁니다. WebClient(Netty)
+대신 sync HttpClient을 고른 이유는 (1) VT와 자연스럽게 결합되고 (2) GraalVM Native Image
+호환성이 더 단순하며 (3) SDK 의존성을 피할 수 있기 때문입니다. 동시성은 §21의 Anthropic
+limiter가 `Semaphore(10)`으로 제어하므로, 클라이언트 자체는 단순 sync IO만 담당합니다.
+
+`api-key`가 비어 있을 경우 빈은 등록되지만 `generate()` 호출 시 명확히 실패합니다
+(`@ConditionalOnProperty`로 빈 자체를 제거하지 않는 이유: `ChatModelRouter`가 가용 provider
+목록을 응답에 포함해 UI 옵션을 동적으로 표시할 수 있도록).
+
+```kotlin
+@Component
+class AnthropicChatClient(
+    private val props: LlmProperties,
+    private val httpClient: HttpClient,                          // java.net.http.HttpClient
+    @Qualifier("anthropicDispatcher") private val dispatcher: CoroutineDispatcher,
+    private val objectMapper: ObjectMapper
+) : ChatModelClient {
+
+    override val provider = LlmProperties.Provider.ANTHROPIC
+    override val isAvailable: Boolean get() = props.anthropic.apiKey.isNotBlank()
+
+    override suspend fun generate(prompt: String, temperature: Double?): ChatResult {
+        require(isAvailable) {
+            "Anthropic provider 요청이 들어왔으나 api-key가 비어 있습니다."
+        }
+        return withContext(dispatcher) {                         // ← Virtual Thread로 격리
+            val body = objectMapper.writeValueAsString(mapOf(
+                "model"       to props.anthropic.inferenceModel,
+                "max_tokens"  to props.anthropic.maxTokens,
+                "temperature" to (temperature ?: props.anthropic.temperature),
+                "messages"    to listOf(mapOf("role" to "user", "content" to prompt))
+            ))
+            val req = HttpRequest.newBuilder()
+                .uri(URI.create("${props.anthropic.baseUrl}/v1/messages"))
+                .timeout(props.anthropic.requestTimeout)
+                .header("x-api-key", props.anthropic.apiKey)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build()
+
+            val resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString())
+            if (resp.statusCode() !in 200..299) {
+                throw AnthropicCallException(resp.statusCode(), resp.body())
+            }
+            val parsed = objectMapper.readValue<AnthropicResponse>(resp.body())
+            ChatResult(
+                text         = parsed.content.firstOrNull()?.text?.trim().orEmpty(),
+                inputTokens  = parsed.usage.inputTokens,
+                outputTokens = parsed.usage.outputTokens
+            )
+        }
+    }
+
+    private data class AnthropicResponse(
+        val content: List<TextBlock>,
+        val usage: Usage
+    ) {
+        data class TextBlock(val type: String, val text: String)
+        data class Usage(
+            @JsonProperty("input_tokens")  val inputTokens: Int,
+            @JsonProperty("output_tokens") val outputTokens: Int
+        )
+    }
+}
+
+@Configuration
+class AnthropicHttpConfig {
+    /** Anthropic IO 전용 Virtual Thread dispatcher. §21의 limiter와 함께 동시성 cap. */
+    @Bean("anthropicDispatcher")
+    fun anthropicDispatcher(): CoroutineDispatcher =
+        Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()
+
+    @Bean
+    fun anthropicHttpClient(props: LlmProperties): HttpClient =
+        HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build()
+}
+```
+
+#### 9-5-6. PromptBuilder — 요청 시점에 Provider별 템플릿 선택
+
+같은 NL 입력이라도 Ollama (gpt-oss:20b)와 Claude는 system 메시지 처리·tool use·JSON 모드
+지원이 달라 프롬프트를 그대로 공유하면 품질이 떨어집니다. `PromptBuilder`는 두 템플릿을
+모두 들고 있다가, 호출 시점에 `provider` 인자로 선택합니다.
+
+```kotlin
+interface PromptTemplate {
+    fun buildSqlGenerationPrompt(nl: String, system: TargetSystem, context: String): String
+    fun buildDatasetNamingPrompt(sql: String, sampleRows: String): String
+    fun buildVizGenerationPrompt(sql: String, sampleRows: String): String
+}
+
+@Component
+class PromptBuilder(
+    private val templates: Map<LlmProperties.Provider, PromptTemplate>
+) {
+    fun buildSqlGenerationPrompt(
+        provider: LlmProperties.Provider,
+        nl: String, system: TargetSystem, context: String
+    ) = templates.getValue(provider).buildSqlGenerationPrompt(nl, system, context)
+    // ... naming / viz 동일 시그니처
+}
+
+@Configuration
+class PromptTemplateConfig {
+    @Bean
+    fun promptTemplates(
+        ollamaTemplate: OllamaPromptTemplate,
+        anthropicTemplate: AnthropicPromptTemplate
+    ): Map<LlmProperties.Provider, PromptTemplate> = mapOf(
+        LlmProperties.Provider.OLLAMA    to ollamaTemplate,
+        LlmProperties.Provider.ANTHROPIC to anthropicTemplate
+    )
+}
+```
+
+#### 9-5-7. ChatModelRouter — 요청 시점 라우팅
+
+두 chat 클라이언트와 두 limiter가 항상 공존하는 상태에서, API 호출은 이 router를 단일
+진입점으로 사용합니다. `provider`가 비어 있으면 `defaultProvider`로 폴백, `isAvailable=false`인
+provider 요청은 명확한 예외로 거절합니다.
+
+```kotlin
+@Component
+class ChatModelRouter(
+    private val clients: Map<LlmProperties.Provider, ChatModelClient>,
+    private val limiters: Map<LlmProperties.Provider, LlmConcurrencyLimiter>,
+    private val props: LlmProperties
+) {
+    /** UI 옵션 동적 표시용. 현재 호출 가능한 provider 목록. */
+    fun availableProviders(): List<LlmProperties.Provider> =
+        clients.values.filter { it.isAvailable }.map { it.provider }
+
+    /** UI가 명시한 provider를 검증 후 반환. 미지정 시 default 사용. */
+    fun resolve(requested: LlmProperties.Provider?): LlmProperties.Provider {
+        val p = requested ?: props.defaultProvider
+        val client = clients[p] ?: throw UnknownProviderException(p)
+        if (!client.isAvailable) throw ProviderUnavailableException(p)
+        return p
+    }
+
+    suspend fun <T> withRouting(
+        provider: LlmProperties.Provider,
+        sessionId: String, jobId: Long,
+        block: suspend (ChatModelClient) -> T
+    ): T {
+        val client  = clients.getValue(provider)
+        val limiter = limiters.getValue(provider)
+        return limiter.withPermit(sessionId, jobId) { block(client) }
+    }
+}
+
+@Configuration
+class ChatModelRegistryConfig {
+    @Bean
+    fun chatModelClients(
+        ollama: OllamaChatClient,
+        anthropic: AnthropicChatClient
+    ): Map<LlmProperties.Provider, ChatModelClient> = mapOf(
+        LlmProperties.Provider.OLLAMA    to ollama,
+        LlmProperties.Provider.ANTHROPIC to anthropic
+    )
+}
+```
+
+`GET /api/llm/providers` 같은 엔드포인트를 추가해 `availableProviders()` 결과를 SPA에 제공하면,
+UI는 Anthropic 키 없이 부팅한 환경에서 옵션을 자동으로 숨길 수 있습니다.
+
+#### 9-5-8. application.yaml — Provider 두 개 모두 항상 로드
+
+```yaml
+hyperion:
+  llm:
+    default-provider: ${HYPERION_DEFAULT_PROVIDER:ollama}        # UI 미지정 시 폴백
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      inference-model: ${OLLAMA_INFERENCE_MODEL:gpt-oss:20b}
+      embedding-model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
+      embedding-dimension: 768
+      embedding-batch-size: 64
+      temperature: 0.1
+      max-tokens: 1024
+      queue:
+        max-concurrent: 1
+        queue-capacity: 32
+        queue-timeout: 60s
+        execution-timeout: 180s
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}                             # 비어 있으면 자동 비활성화
+      base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+      inference-model: ${ANTHROPIC_INFERENCE_MODEL:claude-opus-4-7}
+      max-tokens: 4096
+      temperature: 0.1
+      request-timeout: 60s
+      queue:
+        max-concurrent: 10
+        queue-capacity: 100
+        queue-timeout: 60s
+        execution-timeout: 180s
+```
+
+> **금지 사항**
+> 1. 모델명을 클라이언트 코드 내부에 문자열 리터럴로 작성 (AGENTS.md §5-7).
+> 2. `provider=anthropic` 호출 실패 시 Ollama로 자동 fallback — fail-fast 정책.
+> 3. `defaultProvider`를 런타임 가변으로 만들기 — 부팅 시 결정. UI 선택은 요청 단위로만 동작.
 
 ### 9-6. ChromaDbClient — 저장 및 검색
 
@@ -1612,14 +1907,20 @@ Phase 5 — Oracle/MSSQL + 안정화 (1주)
 
 ### 21-1. 설계 결정
 
-| 항목 | 결정 | 근거 |
-|------|------|------|
-| 동시 LLM 사용자 | **1명** | T4 16GB에서 gpt-oss:20b 추론은 GPU 메모리/시간을 독점. 2건 이상 동시 처리 시 양쪽 모두 지연이 폭증하고 OOM 위험. |
-| 대기 정책 | **FIFO** | `kotlinx.coroutines.sync.Semaphore`가 기본으로 공정성(FIFO)을 보장 → 별도 큐 구현 불필요. |
-| 대기열 깊이 한도 | **`maxWaiting`** (기본 10) | 한도 초과 시 즉시 503으로 사용자에게 명확히 거절 → 무한 대기·메모리 폭주 방지. |
-| 대기 타임아웃 | **`acquireTimeoutMs`** (기본 60초) | 차례를 기다리다 너무 길어지면 504 반환. 사용자 이탈 케이스에서 코루틴이 자동 cancel되며 대기열에서도 제거됨. |
-| 실행 타임아웃 | **`maxExecutionMs`** (기본 180초) | 단일 LLM 호출이 비정상적으로 늘어져 다음 사용자를 막는 것을 방지. |
-| 호스팅 형태 | **인메모리** (`InProcessLlmLimiter`) | 단일 노드 운영 가정. 멀티 노드 확장 시 §21-7의 분산 구현으로 교체. 인터페이스는 동일. |
+UI에서 요청별로 provider를 선택하므로 **두 limiter가 항상 병렬로 존재**하며, 사용자가 어느
+쪽을 골랐는지에 따라 해당 limiter만 사용합니다. Ollama 사용자가 GPU를 점유하는 동안 Anthropic
+사용자는 영향 없이 진행 가능 (그 반대도 동일).
+
+| 항목 | Ollama (`OllamaLlmLimiter`) | Anthropic (`AnthropicLlmLimiter`) | 근거 |
+|------|----------------------------|-----------------------------------|------|
+| 동시 추론 사용자 | **1명** | **10명** | Ollama: T4 16GB에서 gpt-oss:20b는 GPU 독점. Anthropic: 평균 응답 ≤4k tokens 기준 RPM/OTPM 여유 확보용 보수치. 실제 한도는 계약 tier 의존. |
+| 실행 스레드 | 코루틴 (Reactor scheduler) | **Virtual Thread Dispatcher** | Anthropic 호출은 sync `HttpClient`로 대기 시간이 길어, VT에 격리하면 Netty event loop을 안 막음. |
+| 대기 정책 | **FIFO** (`kotlinx.coroutines.sync.Semaphore`) | 양 provider 공통. 공정성 자동 보장 → 별도 큐 객체 불필요. |
+| 대기열 깊이 한도 | `queue.queue-capacity` (Ollama 32 / Anthropic 100) | Anthropic은 동시 10이라 대기 폭도 넓게. 초과 시 503. |
+| 대기 타임아웃 | `queue.queue-timeout` (기본 60s) | 차례 못 받으면 504. 코루틴 cancel 시 자동 큐 이탈. |
+| 실행 타임아웃 | `queue.execution-timeout` (기본 180s) | 단일 호출이 비정상적으로 늘어져 뒷줄을 막는 것 방지. |
+| Fallback | **없음** | **없음** | Anthropic 장애 시 Ollama로 자동 전환하지 않음 — 답변 품질이 갑자기 바뀌는 것이 더 큰 문제. fail-fast. |
+| 호스팅 형태 | 인메모리 (`InProcessLlmLimiter`, provider별 인스턴스) | 단일 노드 가정. 멀티 노드 시 §21-8의 분산 구현으로 교체. |
 
 ### 21-2. 인터페이스
 
@@ -1644,14 +1945,18 @@ interface LlmConcurrencyLimiter {
 
 ### 21-3. 인메모리 구현
 
+Limiter 클래스는 하나(`InProcessLlmLimiter`)이며, **provider별로 별도 빈 인스턴스로 두 개를
+생성**해 각자 자기 `QueueProperties`를 갖고 독립적으로 동작합니다. 큐 통계(대기 인원 등)도
+provider별로 분리되어 UI에 정확한 신호를 줄 수 있습니다.
+
 ```kotlin
-@Component
 class InProcessLlmLimiter(
-    private val props: LlmQueueProperties,
+    private val provider: LlmProperties.Provider,
+    private val queueProps: QueueProperties,
     private val webSocketNotifier: WebSocketNotifier
 ) : LlmConcurrencyLimiter {
 
-    private val semaphore = Semaphore(props.maxConcurrent)   // 기본 permit = 1
+    private val semaphore = Semaphore(queueProps.maxConcurrent)
     private val waiting   = AtomicInteger(0)
 
     override val pendingCount: Int get() = waiting.get()
@@ -1662,34 +1967,59 @@ class InProcessLlmLimiter(
         block: suspend () -> T
     ): T {
         // ① 대기열 깊이 초과 → 즉시 거절 (503)
-        if (waiting.get() >= props.maxWaiting && semaphore.availablePermits == 0) {
-            throw LlmQueueFullException(currentDepth = waiting.get())
+        if (waiting.get() >= queueProps.queueCapacity && semaphore.availablePermits == 0) {
+            throw LlmQueueFullException(provider, currentDepth = waiting.get())
         }
 
         val position = waiting.incrementAndGet()
-        webSocketNotifier.sendQueuePosition(sessionId, jobId, position)
+        webSocketNotifier.sendQueuePosition(sessionId, jobId, provider, position)
 
         var acquired = false
         try {
             // ② 대기 (FIFO) — 정해진 시간 안에 차례를 못 받으면 504
-            withTimeout(props.acquireTimeoutMs) {
+            withTimeout(queueProps.queueTimeout.toMillis()) {
                 semaphore.acquire()
                 acquired = true
             }
-            webSocketNotifier.sendQueueStarted(sessionId, jobId)
+            webSocketNotifier.sendQueueStarted(sessionId, jobId, provider)
 
             // ③ 실행 — 한 건이 비정상적으로 오래 걸리면 강제 종료
-            return withTimeout(props.maxExecutionMs) { block() }
+            return withTimeout(queueProps.executionTimeout.toMillis()) { block() }
         } catch (e: TimeoutCancellationException) {
-            if (!acquired) throw LlmAcquireTimeoutException()
-            else           throw LlmExecutionTimeoutException()
+            if (!acquired) throw LlmAcquireTimeoutException(provider)
+            else           throw LlmExecutionTimeoutException(provider)
         } finally {
             if (acquired) semaphore.release()
             waiting.decrementAndGet()
         }
     }
 }
+
+/** Provider별 limiter 빈 두 개를 생성하고, router용 Map으로 노출. */
+@Configuration
+class LlmLimiterConfig {
+    @Bean
+    fun ollamaLimiter(props: LlmProperties, notifier: WebSocketNotifier) =
+        InProcessLlmLimiter(LlmProperties.Provider.OLLAMA, props.ollama.queue, notifier)
+
+    @Bean
+    fun anthropicLimiter(props: LlmProperties, notifier: WebSocketNotifier) =
+        InProcessLlmLimiter(LlmProperties.Provider.ANTHROPIC, props.anthropic.queue, notifier)
+
+    @Bean
+    fun llmLimiters(
+        ollamaLimiter: InProcessLlmLimiter,
+        anthropicLimiter: InProcessLlmLimiter
+    ): Map<LlmProperties.Provider, LlmConcurrencyLimiter> = mapOf(
+        LlmProperties.Provider.OLLAMA    to ollamaLimiter,
+        LlmProperties.Provider.ANTHROPIC to anthropicLimiter
+    )
+}
 ```
+
+> **두 limiter는 서로를 모릅니다.** 한 사용자가 Ollama에 줄을 서 있어도 다른 사용자는
+> Anthropic limiter를 통해 즉시 실행될 수 있습니다. WebSocket 알림 페이로드에 `provider`를
+> 포함시켜 UI가 "Ollama 대기 3번째" / "Anthropic 즉시 실행 중" 같이 구분해 표시할 수 있도록 합니다.
 
 > **이 구현이 FIFO·취소 안전한 이유:**
 > `kotlinx.coroutines.sync.Semaphore`는 acquire 대기자를 FIFO로 큐잉합니다.
@@ -1698,26 +2028,30 @@ class InProcessLlmLimiter(
 
 ### 21-4. 설정
 
-```kotlin
-@ConfigurationProperties(prefix = "app.llm.queue")
-data class LlmQueueProperties(
-    val maxConcurrent: Int     = 1,        // ★ 동시 LLM 사용자 = 1명
-    val maxWaiting: Int        = 10,       // 대기열 깊이 한도 (초과 시 503)
-    val acquireTimeoutMs: Long = 60_000,   // 1분 안에 차례 못 오면 504
-    val maxExecutionMs: Long   = 180_000   // 단일 LLM 작업 최대 3분
-)
-```
+큐 설정은 §9-5-2의 `QueueProperties` 데이터 클래스를 재사용하며, **provider별로 별도 인스턴스를
+갖고 둘 다 항상 활성**입니다. (`hyperion.llm.ollama.queue.*` / `hyperion.llm.anthropic.queue.*`)
 
 ```yaml
-# application.yaml
-app:
+hyperion:
   llm:
-    queue:
-      max-concurrent: 1
-      max-waiting: 10
-      acquire-timeout-ms: 60000
-      max-execution-ms: 180000
+    default-provider: ollama          # UI 미지정 시 폴백
+    ollama:
+      queue:
+        max-concurrent: 1             # ★ T4 GPU 보호 — 동시 1명
+        queue-capacity: 32
+        queue-timeout: 60s
+        execution-timeout: 180s
+    anthropic:
+      queue:
+        max-concurrent: 10            # ★ RPM/TPM 안전 마진 — 실측 후 조정
+        queue-capacity: 100
+        queue-timeout: 60s
+        execution-timeout: 180s
 ```
+
+> **주의:** Anthropic `max-concurrent`는 계약 tier(RPM/ITPM/OTPM)에 따라 한참 낮춰야 할 수
+> 있습니다. tier 1~2 계약이면 10도 OTPM에 막힐 수 있으니, Phase 2 부하 테스트로 실측한 뒤
+> 운영값을 확정합니다.
 
 ### 21-5. 적용 위치 — LlmOrchestrationService
 
@@ -1727,29 +2061,50 @@ LLM을 호출하는 모든 경로가 limiter를 거치도록, `LlmOrchestrationS
 ```kotlin
 @Service
 class LlmOrchestrationService(
-    private val ollamaClient: OllamaClient,
+    private val embeddingClient: EmbeddingClient,        // 항상 Ollama (provider 무관)
+    private val router: ChatModelRouter,                 // 두 provider 모두 보유
     private val chromaDbClient: ChromaDbClient,
     private val bm25Index: BM25Index,
     private val reranker: RerankerClient,
     private val promptBuilder: PromptBuilder,
-    private val llmLimiter: LlmConcurrencyLimiter   // ★ 주입
+    private val usageRecorder: TokenUsageRecorder
 ) {
     suspend fun generateSql(
-        nl: String, system: TargetSystem, sessionId: String, jobId: Long
-    ): String = llmLimiter.withPermit(sessionId, jobId) {
-        val queryVector = ollamaClient.embed("search_query: $nl")
+        nl: String, system: TargetSystem,
+        requestedProvider: LlmProperties.Provider?,      // UI 페이로드에서 전달, 미지정 가능
+        sessionId: String, jobId: Long
+    ): String {
+        val provider = router.resolve(requestedProvider) // default 폴백·availability 검증
+
+        // 임베딩은 항상 Ollama, permit 밖 (가볍고 메모리 풋프린트 다름)
+        val queryVector = embeddingClient.embed("search_query: $nl")
         val candidates  = retrieveCandidates(system, nl, queryVector)
         val reranked    = reranker.rerank(nl, candidates, topK = 6)
         val context     = ContextAssembler.assemble(reranked, /* ratios */)
-        val prompt      = promptBuilder.buildSqlGenerationPrompt(nl, system, context)
-        ollamaClient.generate(prompt)                // ← permit 보호 영역
+        val prompt      = promptBuilder.buildSqlGenerationPrompt(provider, nl, system, context)
+
+        return router.withRouting(provider, sessionId, jobId) { chatModel ->
+            val result = chatModel.generate(prompt)      // ← provider별 limiter 보호 영역
+            usageRecorder.record(
+                jobId = jobId,
+                provider = chatModel.provider,
+                inputTokens = result.inputTokens,
+                outputTokens = result.outputTokens
+            )
+            result.text
+        }
     }
 }
 ```
 
-> **임베딩 호출(`ollamaClient.embed`)을 permit 안에 넣을지 여부:** 임베딩 모델은 가볍고
-> 생성 모델과 다른 메모리 풋프린트라 동시 실행해도 문제 없으므로 **permit 밖**에 두는 것이
-> 처리량에 유리합니다. permit은 **생성(generate) 호출만 보호**합니다.
+> **임베딩 호출을 permit 안에 넣을지 여부:** 임베딩은 항상 local Ollama에서 동작하며,
+> 생성 모델과 다른 메모리 풋프린트라 동시 실행해도 문제 없습니다. permit은 **추론(generate)
+> 호출만 보호**합니다. 사용자가 매 요청마다 다른 provider를 골라도 임베딩 경로는 그대로입니다.
+
+> **TokenUsageRecorder:** `JobHistory` 또는 별도 테이블에 dataset/job 단위로
+> `(provider, input_tokens, output_tokens, recorded_at)`를 기록합니다. Phase 2 비용 결산과
+> 사용자별 quota 계산의 근거가 됩니다. Anthropic 응답에는 항상 `usage` 필드가 포함되고
+> Ollama는 `prompt_eval_count`/`eval_count`로 동일 정보를 제공합니다.
 
 ### 21-6. WebSocket 알림 프로토콜
 

@@ -25,7 +25,6 @@ repositories {
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webflux")
-    implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-mustache")
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
@@ -44,8 +43,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("io.micrometer:micrometer-registry-prometheus")
     implementation("net.logstash.logback:logstash-logback-encoder:8.0")
-    implementation("org.apache.poi:poi-ooxml:5.3.0")
-    implementation("org.eclipse.jgit:org.eclipse.jgit:7.0.0.202409031743-r")
+    implementation("org.apache.poi:poi-ooxml:5.5.1")
+    implementation("org.eclipse.jgit:org.eclipse.jgit:7.3.0.202506031305-r")
     implementation("com.github.javaparser:javaparser-core:3.26.1")
 
     runtimeOnly("com.mysql:mysql-connector-j")

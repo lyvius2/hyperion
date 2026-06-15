@@ -18,6 +18,9 @@ spring:
     store-type: none
 
 hyperion:
+  llm:
+    # Local default is Ollama. No Anthropic key set here, so the UI auto-hides that option.
+    default-provider: ollama
   storage:
     systems-root: ./.local/systems
     results-root: ./.local/results
