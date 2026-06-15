@@ -1,0 +1,41 @@
+/* Design tokens — see docs/UI_UX_DESIGN.md §2 */
+:root {
+  /* Color palette */
+  --color-primary:         #2563EB;
+  --color-primary-hover:   #1D4ED8;
+  --color-primary-light:   #DBEAFE;
+  --color-primary-muted:   #BFDBFE;
+  --color-header-bg:       #1E40AF;
+  --color-surface:         #FFFFFF;
+  --color-bg:              #F0F4FF;
+  --color-text-primary:    #111827;
+  --color-text-secondary:  #6B7280;
+  --color-text-muted:      #9CA3AF;
+  --color-text-on-primary: #FFFFFF;
+  --color-success:         #16A34A;
+  --color-error:           #DC2626;
+
+  /* Spacing */
+  --space-xs:   4px;
+  --space-sm:   8px;
+  --space-md-:  12px;
+  --space-md:   16px;
+  --space-lg:   24px;
+  --space-xl:   32px;
+  --space-2xl:  48px;
+
+  /* Radius */
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  16px;
+
+  /* Shadow */
+  --shadow-sm:  0 1px 4px rgba(0, 0, 0, 0.08);
+  --shadow-md:  0 4px 16px rgba(37, 99, 235, 0.10);
+  --shadow-lg:  0 20px 60px rgba(0, 0, 0, 0.15);
+
+  /* Layout */
+  --header-height: 56px;
+  --sidebar-width: 300px;
+  --input-max-height: 240px;
+}

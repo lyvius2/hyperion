@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hyperion</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/chat.css">
+</head>
+<body>
+  <header class="header">
+    <a href="/" class="header-logo" aria-label="hyperion home">hyperion</a>
+    <div class="header-right">
+      <a href="https://github.com/lyvius2/hyperion" class="header-slogan" target="_blank" rel="noopener">
+        Ask Data. Discover Insight.
+      </a>
+      <button type="button" class="header-sidebar-btn" aria-label="Open sidebar" data-role="sidebar-toggle">≡</button>
+    </div>
+  </header>
+
+  <main class="main-frame">
+    <section class="welcome-stage" data-role="welcome-stage">
+      <h1 class="welcome-stage__title">What data would you like to explore?</h1>
+
+      <form class="input-form" data-role="input-form" autocomplete="off">
+        <div class="input-toolbar">
+          <span class="dropdown dropdown--with-icon">
+            <svg class="dropdown-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="1.5" y="2.5" width="13" height="9" rx="1" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5.5 14h5M8 11.5V14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <select class="dropdown-select" data-role="llm-select" aria-label="LLM provider">
+              <!-- TODO: populate from GET /api/llm/providers -->
+              <option value="ollama" selected>Local</option>
+              <option value="anthropic">Anthropic (Cloud)</option>
+            </select>
+          </span>
+
+          <span class="dropdown">
+            <select class="dropdown-select" data-role="system-select" aria-label="Target system" required>
+              <!-- TODO: populate from GET /api/systems (ingestionStatus = COMPLETED) -->
+              <option value="" selected disabled>Select a system...</option>
+            </select>
+          </span>
+
+          <span class="input-toolbar__spacer"></span>
+
+          <label class="checkbox-option">
+            <input type="checkbox" data-role="opt-visualize">
+            <span class="checkbox-label">Visualize</span>
+          </label>
+
+          <label class="checkbox-option">
+            <input type="checkbox" data-role="opt-analyze">
+            <span class="checkbox-label">Analyze Result</span>
+          </label>
+        </div>
+
+        <div class="input-wrapper">
+          <textarea
+            class="input-textarea"
+            data-role="input-textarea"
+            rows="3"
+            placeholder="Type your data request here... (Shift+Enter for new line)"
+            aria-label="Your data request"
+          ></textarea>
+          <button type="submit" class="send-btn is-hidden" data-role="send-btn" aria-label="Send">↑</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

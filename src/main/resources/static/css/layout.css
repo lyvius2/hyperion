@@ -1,0 +1,62 @@
+/* Header + main frame layout — UI_UX_DESIGN §3, §4 */
+
+.header {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--header-height);
+  background: var(--color-header-bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-lg);
+  z-index: 900;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  color: var(--color-text-on-primary);
+}
+
+.header-logo {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #fff;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.header-slogan {
+  color: var(--color-primary-muted);
+  font-size: 14px;
+  font-style: italic;
+  transition: color 0.15s;
+}
+.header-slogan:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+.header-sidebar-btn {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 22px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: background 0.15s;
+}
+.header-sidebar-btn:hover { background: rgba(255, 255, 255, 0.15); }
+
+/* Main frame */
+.main-frame {
+  height: calc(100vh - var(--header-height));
+  margin-top: var(--header-height);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

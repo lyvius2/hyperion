@@ -33,12 +33,8 @@ spring:
     store-type: redis
     redis:
       namespace: hyperion:session
-
-server:
-  servlet:
-    session:
-      cookie:
-        secure: true
+    cookie:
+      secure: true
 
 hyperion:
   llm:

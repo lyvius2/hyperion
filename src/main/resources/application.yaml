@@ -1,12 +1,5 @@
 server:
   port: 5542
-  servlet:
-    session:
-      cookie:
-        name: JSESSIONID
-        http-only: true
-        same-site: lax
-        # secure: true ← Enable in production (requires HTTPS)
 
 spring:
   application:
@@ -14,7 +7,7 @@ spring:
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:local}
   main:
-    web-application-type: servlet
+    web-application-type: reactive
   jpa:
     open-in-view: false
     hibernate:
@@ -26,6 +19,11 @@ spring:
           time_zone: Asia/Seoul
   session:
     timeout: 15m
+    cookie:
+      name: SESSION
+      http-only: true
+      same-site: lax
+      # secure: true ← Enable in production (requires HTTPS)
 
 management:
   endpoints:
