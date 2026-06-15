@@ -1207,21 +1207,27 @@ chmod 600 .env   # 파일 권한 제한
 ### 11-5. Dockerfile
 
 ```dockerfile
-FROM eclipse-temurin:21-jdk-alpine AS builder
+# GraalVM Community 25 (Oracle Linux 기반)
+FROM ghcr.io/graalvm/jdk-community:25 AS builder
 WORKDIR /app
-COPY gradlew . && COPY gradle gradle && COPY build.gradle.kts .
-COPY settings.gradle.kts . && COPY src src
+COPY gradlew .
+COPY gradle gradle
+COPY build.gradle.kts settings.gradle.kts ./
+COPY src src
 RUN ./gradlew bootJar -x test --no-daemon
 
-FROM eclipse-temurin:21-jre-alpine
+FROM ghcr.io/graalvm/jdk-community:25
 WORKDIR /app
-RUN apk add --no-cache git curl tzdata \
-    && cp /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
+RUN microdnf install -y git tar gzip tzdata && microdnf clean all \
+    && ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && echo "Asia/Seoul" > /etc/timezone
 COPY --from=builder /app/build/libs/*.jar app.jar
 EXPOSE 5542
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
 ```
+
+> Phase 1은 일반 `bootJar` 배포. native-image 빌드가 필요해지는 시점에
+> `ghcr.io/graalvm/native-image-community:25-muslib` 로 builder 단계만 교체하면 됩니다.
 
 ### 11-6. 초기 DDL 자동 실행
 

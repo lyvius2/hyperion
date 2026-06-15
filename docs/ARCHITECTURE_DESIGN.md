@@ -1214,21 +1214,27 @@ chmod 600 .env   # restrict file permissions
 ### 11-5. Dockerfile
 
 ```dockerfile
-FROM eclipse-temurin:21-jdk-alpine AS builder
+# GraalVM Community 25 (Oracle Linux based)
+FROM ghcr.io/graalvm/jdk-community:25 AS builder
 WORKDIR /app
-COPY gradlew . && COPY gradle gradle && COPY build.gradle.kts .
-COPY settings.gradle.kts . && COPY src src
+COPY gradlew .
+COPY gradle gradle
+COPY build.gradle.kts settings.gradle.kts ./
+COPY src src
 RUN ./gradlew bootJar -x test --no-daemon
 
-FROM eclipse-temurin:21-jre-alpine
+FROM ghcr.io/graalvm/jdk-community:25
 WORKDIR /app
-RUN apk add --no-cache git curl tzdata \
-    && cp /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
+RUN microdnf install -y git tar gzip tzdata && microdnf clean all \
+    && ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && echo "Asia/Seoul" > /etc/timezone
 COPY --from=builder /app/build/libs/*.jar app.jar
 EXPOSE 5542
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
 ```
+
+> Phase 1 deploys a regular `bootJar`. When native-image is needed,
+> swap only the builder stage to `ghcr.io/graalvm/native-image-community:25-muslib`.
 
 ### 11-6. Automatic Initial DDL Execution
 
