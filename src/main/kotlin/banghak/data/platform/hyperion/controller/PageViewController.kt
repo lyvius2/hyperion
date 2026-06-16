@@ -1,4 +1,4 @@
-package banghak.data.platform.hyperion.web
+package banghak.data.platform.hyperion.controller
 
 import org.springframework.stereotype.Controller
 import org.springframework.web.bind.annotation.GetMapping
