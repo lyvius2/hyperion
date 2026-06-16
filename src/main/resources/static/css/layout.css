@@ -60,3 +60,127 @@
   flex-direction: column;
   overflow: hidden;
 }
+
+/* ── Sidebar (right, sliding) — UI_UX_DESIGN §10-1 ───────────────────── */
+.sidebar {
+  position: fixed;
+  top: var(--header-height);
+  right: 0;
+  width: var(--sidebar-width);
+  height: calc(100vh - var(--header-height));
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-primary-muted);
+  box-shadow: -4px 0 24px rgba(37, 99, 235, 0.08);
+  transform: translateX(100%);
+  transition: transform 0.25s ease-in-out;
+  z-index: 800;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar.open {
+  transform: translateX(0);
+}
+
+/* Dimmed backdrop — appears behind the sidebar */
+.sidebar-overlay {
+  position: fixed;
+  inset: var(--header-height) 0 0 0;
+  background: rgba(0, 0, 0, 0.28);
+  z-index: 799;
+  display: none;
+  /* Smooth fade-in / fade-out */
+  opacity: 0;
+  transition: opacity 0.25s ease-in-out;
+}
+.sidebar-overlay.visible {
+  display: block;
+  opacity: 1;
+}
+
+/* Sidebar inner layout */
+.sidebar-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--color-primary-muted);
+  flex-shrink: 0;
+}
+
+.sidebar-new-chat {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  padding: 9px 16px;
+}
+
+.sidebar-section-label {
+  padding: 14px 16px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.sidebar-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 16px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+/* Individual history item */
+.sidebar-history-item {
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 10px 10px;
+  transition: background 0.13s;
+}
+.sidebar-history-item:hover {
+  background: var(--color-primary-light);
+}
+
+.sidebar-history-item__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  margin-bottom: 3px;
+}
+
+.sidebar-history-item__meta {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-history-item__icons {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.sidebar-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+/* Active state (viewing this history item) */
+.sidebar-history-item.is-active {
+  background: var(--color-primary-light);
+  border-left: 3px solid var(--color-primary);
+  padding-left: 7px;
+}

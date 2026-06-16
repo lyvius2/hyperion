@@ -24,6 +24,26 @@
     </div>
   </header>
 
+  <!-- Sidebar overlay (dimmed backdrop) — UI_UX_DESIGN §10-1 -->
+  <div class="sidebar-overlay" data-role="sidebar-overlay" aria-hidden="true"></div>
+
+  <!-- Right sidebar — UI_UX_DESIGN §10 -->
+  <aside class="sidebar" id="sidebar" aria-label="History sidebar" aria-hidden="true">
+    <div class="sidebar-header">
+      <button type="button" class="sidebar-new-chat btn-outline" data-role="new-chat-btn">
+        <span aria-hidden="true">＋</span> New Chat
+      </button>
+    </div>
+
+    <div class="sidebar-section-label">Recent</div>
+
+    <ul class="sidebar-history-list" data-role="sidebar-history-list" role="list">
+      <!-- History items are injected by sidebar.loadHistory() in app.js -->
+      <!-- Empty state shown when no history exists -->
+      <li class="sidebar-empty" data-role="sidebar-empty">No history yet.</li>
+    </ul>
+  </aside>
+
   <main class="main-frame">
     <section class="welcome-stage" data-role="welcome-stage">
       <h1 class="welcome-stage__title">What data would you like to explore?</h1>
