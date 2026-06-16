@@ -24,6 +24,50 @@
     </div>
   </header>
 
+  <!-- Sign In modal — API_SPECIFICATION §2-1 -->
+  <div class="modal-overlay" id="signin-modal" data-role="signin-modal" role="dialog"
+       aria-modal="true" aria-labelledby="signin-title" aria-hidden="false">
+    <div class="modal-box signin-modal__box">
+
+      <!-- Modal header -->
+      <div class="signin-modal__header">
+        <h2 class="signin-modal__title" id="signin-title">Sign In</h2>
+        <button type="button" class="signin-modal__close"
+                data-role="signin-close" aria-label="Close sign in">✕</button>
+      </div>
+
+      <!-- Sign in form -->
+      <form class="signin-modal__form" data-role="signin-form" autocomplete="on" novalidate>
+        <div class="form-field">
+          <label class="form-label" for="signin-username">ID</label>
+          <input class="form-input" type="text" id="signin-username"
+                 data-role="signin-username"
+                 placeholder="Enter your ID"
+                 autocomplete="username"
+                 required />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="signin-password">Password</label>
+          <input class="form-input" type="password" id="signin-password"
+                 data-role="signin-password"
+                 placeholder="Enter your password"
+                 autocomplete="current-password"
+                 required />
+        </div>
+
+        <!-- Error message (hidden until a sign-in failure occurs) -->
+        <p class="signin-modal__error is-hidden" data-role="signin-error" role="alert"></p>
+
+        <button type="submit" class="btn-primary signin-modal__submit"
+                data-role="signin-submit">
+          Sign In
+        </button>
+      </form>
+
+    </div>
+  </div>
+
   <!-- Sidebar overlay (dimmed backdrop) — UI_UX_DESIGN §10-1 -->
   <div class="sidebar-overlay" data-role="sidebar-overlay" aria-hidden="true"></div>
 

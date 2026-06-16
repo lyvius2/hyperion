@@ -1,3 +1,139 @@
+// ── Sign In modal — API_SPECIFICATION §2-1 ─────────────────────────────
+const signinModal = (() => {
+  const modalEl   = document.getElementById('signin-modal');
+  const closeBtn  = document.querySelector('[data-role="signin-close"]');
+  const form      = document.querySelector('[data-role="signin-form"]');
+  const usernameInput = document.querySelector('[data-role="signin-username"]');
+  const passwordInput = document.querySelector('[data-role="signin-password"]');
+  const errorEl   = document.querySelector('[data-role="signin-error"]');
+  const submitBtn = document.querySelector('[data-role="signin-submit"]');
+
+  if (!modalEl) return {};
+
+  /** Display an error message inside the modal. */
+  function showError(message) {
+    if (!errorEl) return;
+    errorEl.textContent = message;
+    errorEl.classList.remove('is-hidden');
+    [usernameInput, passwordInput].forEach(el => el?.classList.add('is-error'));
+  }
+
+  /** Clear any visible error state. */
+  function clearError() {
+    if (!errorEl) return;
+    errorEl.classList.add('is-hidden');
+    errorEl.textContent = '';
+    [usernameInput, passwordInput].forEach(el => el?.classList.remove('is-error'));
+  }
+
+  /** Close (hide) the modal with a fade-out transition. */
+  function close() {
+    modalEl.classList.add('is-hidden');
+    modalEl.setAttribute('aria-hidden', 'true');
+    clearError();
+  }
+
+  /** Open (show) the modal and focus the username field. */
+  function open() {
+    modalEl.classList.remove('is-hidden');
+    modalEl.setAttribute('aria-hidden', 'false');
+    usernameInput?.focus();
+  }
+
+  /**
+   * Submit sign-in credentials to POST /auth/login.
+   * On success, the server sets a JSESSIONID cookie and we reload.
+   * On failure, display a user-friendly error message.
+   */
+  async function submit() {
+    const username = usernameInput?.value.trim() ?? '';
+    const password = passwordInput?.value ?? '';
+
+    if (!username || !password) {
+      showError('Please enter both your ID and password.');
+      return;
+    }
+
+    clearError();
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Signing in…';
+    }
+
+    try {
+      const res = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ username, password }),
+      });
+
+      if (res.ok) {
+        // Session cookie (JSESSIONID) is set by the server automatically.
+        close();
+        // TODO: update header with member info (displayName, role) once
+        //       the member API is wired up, instead of a full reload.
+        window.location.reload();
+        return;
+      }
+
+      // Map known HTTP status codes → user-friendly messages
+      const ERROR_MESSAGES = {
+        401: 'Incorrect ID or password. Please try again.',
+        403: 'Your account is inactive. Contact your administrator.',
+        423: 'Your account is locked due to too many failed attempts.',
+      };
+      showError(ERROR_MESSAGES[res.status] ?? 'Sign in failed. Please try again.');
+    } catch (_) {
+      showError('Network error. Please check your connection and try again.');
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign In';
+      }
+    }
+  }
+
+  // ── Wire up events ────────────────────────────────────────────────────
+
+  // X button closes the modal
+  closeBtn?.addEventListener('click', close);
+
+  // Form submit (Enter key on any field, or button click)
+  form?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    submit();
+  });
+
+  // Clear error when the user starts typing again
+  [usernameInput, passwordInput].forEach(el => {
+    el?.addEventListener('input', clearError);
+  });
+
+  // Trap Tab key inside the modal for accessibility
+  modalEl.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab') return;
+    const focusable = [...modalEl.querySelectorAll(
+      'input, button:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    )];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (event.shiftKey) {
+      if (document.activeElement === first) { event.preventDefault(); last.focus(); }
+    } else {
+      if (document.activeElement === last)  { event.preventDefault(); first.focus(); }
+    }
+  });
+
+  // Auto-focus username when modal is visible on page load
+  if (!modalEl.classList.contains('is-hidden')) {
+    usernameInput?.focus();
+  }
+
+  return { open, close };
+})();
+
 // ── Input control — UI_UX_DESIGN §5, §6 ────────────────────────────────
 // TODO: wire up to /api/llm/providers, /api/systems, and send pipeline.
 (() => {

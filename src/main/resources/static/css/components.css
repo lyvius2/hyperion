@@ -1,5 +1,138 @@
 /* Shared components — buttons, dropdowns, checkboxes */
 
+/* ── Modal overlay — UI_UX_DESIGN §2-4 ──────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Fade animation */
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+.modal-overlay.is-hidden {
+  /* Override: keep in DOM but invisible so transition plays on close */
+  pointer-events: none;
+  opacity: 0;
+}
+
+.modal-box {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: 32px;
+  min-width: 380px;
+  max-width: 480px;
+  width: 100%;
+  box-shadow: var(--shadow-lg);
+}
+
+/* ── Sign In modal specifics ─────────────────────────────────────────── */
+.signin-modal__box {
+  /* slight scale-in on open */
+  animation: modal-appear 0.2s ease;
+}
+@keyframes modal-appear {
+  from { transform: scale(0.96); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+
+.signin-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+}
+
+.signin-modal__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+}
+
+.signin-modal__close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s, background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.signin-modal__close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-primary-light);
+}
+
+.signin-modal__form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.signin-modal__error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-error);
+  background: #fff1f1;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+}
+
+.signin-modal__submit {
+  width: 100%;
+  padding: 11px;
+  font-size: 15px;
+  font-weight: 600;
+  margin-top: 4px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Form field (shared: label + input) ─────────────────────────────── */
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.form-input {
+  border: 1.5px solid var(--color-primary-muted);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  outline: none;
+}
+.form-input::placeholder { color: var(--color-text-muted); }
+.form-input:hover  { border-color: var(--color-primary); }
+.form-input:focus  {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+.form-input.is-error {
+  border-color: var(--color-error);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12);
+}
+
 /* Primary button */
 .btn-primary {
   background: var(--color-primary);
