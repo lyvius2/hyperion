@@ -23,18 +23,14 @@ data class CreateSystemRequest(
     @field:Size(max = 500)
     val description: String? = null,
 
-    @field:NotBlank
     @field:Size(max = 500)
     val dbUrl: String,
 
-    @field:NotNull
     val dbType: DbType,
 
-    @field:NotBlank
     @field:Size(max = 255)
     val dbUsername: String,
 
-    @field:NotBlank
     @field:Size(max = 255)
     val dbPassword: String,
 

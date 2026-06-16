@@ -1,9 +1,7 @@
 package banghak.data.platform.hyperion.controller.dto.admin
 
-import banghak.data.platform.hyperion.repository.entity.FileType
 import banghak.data.platform.hyperion.repository.entity.IngestionStatus
 import banghak.data.platform.hyperion.dto.IngestionMode
-import jakarta.validation.constraints.NotNull
 import java.time.OffsetDateTime
 
 // ──────────────────────────────────────────────────────────────────
@@ -12,7 +10,6 @@ import java.time.OffsetDateTime
 
 /** POST /admin/systems/{systemId}/ingest */
 data class TriggerIngestionRequest(
-    @field:NotNull
     val mode: IngestionMode
 )
 
