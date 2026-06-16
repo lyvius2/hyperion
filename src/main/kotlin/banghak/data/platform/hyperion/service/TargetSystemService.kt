@@ -25,7 +25,6 @@ import java.security.MessageDigest
  * touched here for cascade delete of [banghak.data.platform.hyperion.repository.entity.SystemFile].
  */
 @Service
-@Transactional
 class TargetSystemService(
     private val systemRepository: TargetSystemRepository,
     private val systemFileRepository: SystemFileRepository,
