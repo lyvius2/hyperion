@@ -7,7 +7,6 @@ import org.springframework.security.config.web.server.ServerHttpSecurity
 import org.springframework.security.web.server.SecurityWebFilterChain
 
 // TODO Phase 1: replace with the proper authn/authz chain (Member + Spring Session Redis,
-// CSRF for state-changing endpoints, ROLE-based path matchers per ARCHITECTURE_DESIGN §27).
 @Configuration
 @EnableWebFluxSecurity
 class SecurityConfig {

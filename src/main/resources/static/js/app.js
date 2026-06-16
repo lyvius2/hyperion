@@ -1,4 +1,4 @@
-// ── Sign In modal — API_SPECIFICATION §2-1 ─────────────────────────────
+// ── Sign In modal ─────────────────────────────
 const signinModal = (() => {
   const modalEl   = document.getElementById('signin-modal');
   const closeBtn  = document.querySelector('[data-role="signin-close"]');
@@ -134,7 +134,7 @@ const signinModal = (() => {
   return { open, close };
 })();
 
-// ── Input control — UI_UX_DESIGN §5, §6 ────────────────────────────────
+// ── Input control ────────────────────────────────
 // TODO: wire up to /api/llm/providers, /api/systems, and send pipeline.
 (() => {
   const textarea = document.querySelector('[data-role="input-textarea"]');
@@ -186,7 +186,7 @@ const signinModal = (() => {
   sync();
 })();
 
-// ── Sidebar — UI_UX_DESIGN §10 ──────────────────────────────────────────
+// ── Sidebar ──────────────────────────────────────────
 const sidebar = (() => {
   const sidebarEl  = document.getElementById('sidebar');
   const overlayEl  = document.querySelector('[data-role="sidebar-overlay"]');
