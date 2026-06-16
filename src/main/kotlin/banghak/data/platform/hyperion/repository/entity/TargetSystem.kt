@@ -1,5 +1,8 @@
 package banghak.data.platform.hyperion.repository.entity
 
+import banghak.data.platform.hyperion.controller.dto.admin.CreateSystemRequest
+import banghak.data.platform.hyperion.controller.dto.admin.UpdateSystemRequest
+import banghak.data.platform.hyperion.infra.crypto.TokenEncryptor
 import jakarta.persistence.*
 import java.time.LocalDateTime
 
@@ -94,5 +97,42 @@ data class TargetSystem(
 
     @Column(name = "updated_at", nullable = false)
     val updatedAt: LocalDateTime = LocalDateTime.now()
-)
+) {
+    companion object {
+        @JvmStatic
+        fun of(request: CreateSystemRequest, createdBy: Member, rootPath: String, chromaCollection: String, tokenEncryptor: TokenEncryptor): TargetSystem {
+            val now = LocalDateTime.now()
+            return TargetSystem(
+                name = request.name,
+                description = request.description,
+                rootPath = rootPath,
+                chromaCollection = chromaCollection,
+                dbUrl = request.dbUrl,
+                dbType = request.dbType,
+                dbUsernameEnc = tokenEncryptor.encrypt(request.dbUsername),
+                dbPasswordEnc = tokenEncryptor.encrypt(request.dbPassword),
+                gitUrl = request.gitUrl,
+                gitAccessTokenEnc = request.gitAccessToken?.let(tokenEncryptor::encrypt),
+                createdBy = createdBy,
+                createdAt = now,
+                updatedAt = now
+            )
+        }
+    }
+
+    fun copy(request: UpdateSystemRequest, tokenEncryptor: TokenEncryptor): TargetSystem {
+        return this.copy(
+            description = request.description ?: this.description,
+            dbUrl = request.dbUrl ?: this.dbUrl,
+            dbType = request.dbType ?: this.dbType,
+            dbUsernameEnc = request.dbUsername?.let(tokenEncryptor::encrypt) ?: this.dbUsernameEnc,
+            dbPasswordEnc = request.dbPassword?.let(tokenEncryptor::encrypt) ?: this.dbPasswordEnc,
+            gitUrl = request.gitUrl ?: this.gitUrl,
+            gitAccessTokenEnc = request.gitAccessToken?.let(tokenEncryptor::encrypt) ?: this.gitAccessTokenEnc,
+            slackWebhookUrl = request.slackWebhookUrl ?: this.slackWebhookUrl,
+            slackEnabled = request.slackEnabled ?: this.slackEnabled,
+            updatedAt = LocalDateTime.now()
+        )
+    }
+}
 

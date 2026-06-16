@@ -24,6 +24,10 @@ hyperion:
   storage:
     systems-root: ./.local/systems
     results-root: ./.local/results
+  crypto:
+    # Local-only AES-256 key (32 bytes of "hyperion-local-development-key32" Base64-encoded).
+    # NEVER use this key in any non-local environment.
+    master-key: ${HYPERION_CRYPTO_MASTER_KEY:aHlwZXJpb24tbG9jYWwtZGV2ZWxvcG1lbnQta2V5MzI=}
 
 logging:
   level:

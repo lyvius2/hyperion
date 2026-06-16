@@ -78,3 +78,6 @@ hyperion:
   storage:
     systems-root: ${SYSTEMS_ROOT:/data/systems}
     results-root: ${RESULTS_ROOT:/data/results}
+  crypto:
+    # Base64-encoded 32-byte AES-256 key. Must be set in every environment via env var.
+    master-key: ${HYPERION_CRYPTO_MASTER_KEY:}
