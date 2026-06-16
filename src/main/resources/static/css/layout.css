@@ -1,4 +1,4 @@
-/* Header + main frame layout — UI_UX_DESIGN §3, §4 */
+/* Header + main frame layout */
 
 .header {
   position: fixed;
@@ -61,7 +61,7 @@
   overflow: hidden;
 }
 
-/* ── Sidebar (right, sliding) — UI_UX_DESIGN §10-1 ───────────────────── */
+/* ── Sidebar (right, sliding) ───────────────────── */
 .sidebar {
   position: fixed;
   top: var(--header-height);

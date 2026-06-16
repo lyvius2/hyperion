@@ -1,6 +1,6 @@
 /* Shared components — buttons, dropdowns, checkboxes */
 
-/* ── Modal overlay — UI_UX_DESIGN §2-4 ──────────────────────────────── */
+/* ── Modal overlay ──────────────────────────────── */
 .modal-overlay {
   position: fixed;
   inset: 0;
