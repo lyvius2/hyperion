@@ -2,6 +2,7 @@ package banghak.data.platform.hyperion.repository.entity
 
 import banghak.data.platform.hyperion.controller.dto.admin.CreateSystemRequest
 import banghak.data.platform.hyperion.controller.dto.admin.UpdateSystemRequest
+import banghak.data.platform.hyperion.dto.EncryptedSystemInfo
 import banghak.data.platform.hyperion.infra.crypto.TokenEncryptor
 import jakarta.persistence.*
 import java.time.LocalDateTime
@@ -100,7 +101,7 @@ data class TargetSystem(
 ) {
     companion object {
         @JvmStatic
-        fun of(request: CreateSystemRequest, createdBy: Member, rootPath: String, chromaCollection: String, tokenEncryptor: TokenEncryptor): TargetSystem {
+        fun of(request: CreateSystemRequest, createdBy: Member, rootPath: String, chromaCollection: String, encrypted: EncryptedSystemInfo): TargetSystem {
             val now = LocalDateTime.now()
             return TargetSystem(
                 name = request.name,
@@ -109,10 +110,10 @@ data class TargetSystem(
                 chromaCollection = chromaCollection,
                 dbUrl = request.dbUrl,
                 dbType = request.dbType,
-                dbUsernameEnc = tokenEncryptor.encrypt(request.dbUsername),
-                dbPasswordEnc = tokenEncryptor.encrypt(request.dbPassword),
+                dbUsernameEnc = encrypted.dbUsernameEnc,
+                dbPasswordEnc = encrypted.dbPasswordEnc,
                 gitUrl = request.gitUrl,
-                gitAccessTokenEnc = request.gitAccessToken?.let(tokenEncryptor::encrypt),
+                gitAccessTokenEnc = encrypted.gitAccessTokenEnc,
                 createdBy = createdBy,
                 createdAt = now,
                 updatedAt = now
@@ -120,15 +121,15 @@ data class TargetSystem(
         }
     }
 
-    fun copy(request: UpdateSystemRequest, tokenEncryptor: TokenEncryptor): TargetSystem {
+    fun copy(request: UpdateSystemRequest, encrypted: EncryptedSystemInfo): TargetSystem {
         return this.copy(
             description = request.description ?: this.description,
             dbUrl = request.dbUrl ?: this.dbUrl,
             dbType = request.dbType ?: this.dbType,
-            dbUsernameEnc = request.dbUsername?.let(tokenEncryptor::encrypt) ?: this.dbUsernameEnc,
-            dbPasswordEnc = request.dbPassword?.let(tokenEncryptor::encrypt) ?: this.dbPasswordEnc,
+            dbUsernameEnc = encrypted.dbUsernameEnc,
+            dbPasswordEnc = encrypted.dbPasswordEnc,
             gitUrl = request.gitUrl ?: this.gitUrl,
-            gitAccessTokenEnc = request.gitAccessToken?.let(tokenEncryptor::encrypt) ?: this.gitAccessTokenEnc,
+            gitAccessTokenEnc = encrypted.gitAccessTokenEnc,
             slackWebhookUrl = request.slackWebhookUrl ?: this.slackWebhookUrl,
             slackEnabled = request.slackEnabled ?: this.slackEnabled,
             updatedAt = LocalDateTime.now()
