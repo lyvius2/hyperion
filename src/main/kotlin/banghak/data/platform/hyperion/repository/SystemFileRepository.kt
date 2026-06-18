@@ -7,7 +7,6 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
-import org.springframework.transaction.annotation.Transactional
 
 @Repository
 interface SystemFileRepository : JpaRepository<SystemFile, Long> {
@@ -24,7 +23,6 @@ interface SystemFileRepository : JpaRepository<SystemFile, Long> {
     fun existsBySystemIdAndOriginalFilename(systemId: Long, originalFilename: String): Boolean
 
     @Modifying
-    @Transactional
     @Query("delete from SystemFile f where f.system.id = :systemId")
     fun deleteAllBySystemId(@Param("systemId") systemId: Long): Int
 
